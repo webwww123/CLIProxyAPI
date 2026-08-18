@@ -4,10 +4,50 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"testing"
 
 	"github.com/gin-gonic/gin"
 )
+
+func TestGinLogrusLoggerReusesOnlySafeInternalRequestID(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	for _, tc := range []struct {
+		name       string
+		incoming   string
+		want       string
+		wantRegexp string
+	}{
+		{name: "safe", incoming: "request-safe_123", want: "request-safe_123"},
+		{name: "unsafe", incoming: "unsafe request id", wantRegexp: `^[a-f0-9]{8}$`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			engine := gin.New()
+			engine.Use(GinLogrusLogger())
+			var contextID string
+			engine.POST("/v1/chat/completions", func(c *gin.Context) {
+				contextID = GetRequestID(c.Request.Context())
+				c.Status(http.StatusNoContent)
+			})
+
+			req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+			req.Header.Set(InternalRequestIDHeader, tc.incoming)
+			recorder := httptest.NewRecorder()
+			engine.ServeHTTP(recorder, req)
+
+			if tc.want != "" && contextID != tc.want {
+				t.Fatalf("request ID = %q, want %q", contextID, tc.want)
+			}
+			if tc.wantRegexp != "" && !regexp.MustCompile(tc.wantRegexp).MatchString(contextID) {
+				t.Fatalf("request ID = %q, want pattern %q", contextID, tc.wantRegexp)
+			}
+			if got := recorder.Header().Get(InternalRequestIDHeader); got != contextID {
+				t.Fatalf("response request ID = %q, context ID = %q", got, contextID)
+			}
+		})
+	}
+}
 
 func TestGinLogrusRecoveryRepanicsErrAbortHandler(t *testing.T) {
 	gin.SetMode(gin.TestMode)

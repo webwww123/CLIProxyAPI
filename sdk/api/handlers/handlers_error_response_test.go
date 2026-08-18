@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -17,6 +18,18 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 )
+
+func TestBuildErrorResponseBodyPreservesStructuredUpstreamMetadata(t *testing.T) {
+	upstream := `{"error":{"message":"rejected","type":"invalid_request_error","code":"upstream_invalid_request","metadata":{"compatibility_diagnostic":{"schema_version":1,"fingerprint":"0123456789abcdef"}}}}`
+	body := BuildErrorResponseBody(http.StatusBadRequest, upstream)
+	if string(body) != upstream {
+		t.Fatalf("structured upstream error was changed: %s", string(body))
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatalf("preserved error is invalid JSON: %v", err)
+	}
+}
 
 func TestWriteErrorResponse_AddonHeadersDisabledByDefault(t *testing.T) {
 	gin.SetMode(gin.TestMode)

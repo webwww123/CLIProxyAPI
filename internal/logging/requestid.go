@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 )
@@ -13,6 +14,28 @@ type requestIDKey struct{}
 
 // ginRequestIDKey is the Gin context key for request IDs.
 const ginRequestIDKey = "__request_id__"
+
+// InternalRequestIDHeader is the hop-by-hop correlation header used by the
+// local NewAPI/compatibility chain.  It is intentionally not a generic
+// client-trace header: callers must validate it before accepting it.
+const InternalRequestIDHeader = "X-Oneapi-Request-Id"
+
+// IsSafeRequestID accepts only the bounded identifier alphabet used by the
+// local gateways.  Rejecting arbitrary client text prevents log/header
+// injection while still preserving NewAPI's longer request IDs.
+func IsSafeRequestID(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > 128 {
+		return false
+	}
+	for _, r := range value {
+		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
+			(r >= '0' && r <= '9') || r == '-' || r == '_' || r == '.' || r == ':') {
+			return false
+		}
+	}
+	return true
+}
 
 // GenerateRequestID creates a new 8-character hex request ID.
 func GenerateRequestID() string {

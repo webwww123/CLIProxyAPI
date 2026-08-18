@@ -11,12 +11,14 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/textproto"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
@@ -67,6 +69,27 @@ func (e *OpenAICompatExecutor) PrepareRequest(req *http.Request, auth *cliproxya
 	}
 	util.ApplyCustomHeadersFromAttrs(req, attrs)
 	return nil
+}
+
+func forwardInternalRequestID(ctx context.Context, targetURL string, headers http.Header) {
+	if ctx == nil || headers == nil {
+		return
+	}
+	requestID := logging.GetRequestID(ctx)
+	if !logging.IsSafeRequestID(requestID) || !isLocalMistralGateway(targetURL) {
+		return
+	}
+	headers.Set(logging.InternalRequestIDHeader, requestID)
+}
+
+func isLocalMistralGateway(targetURL string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(targetURL))
+	if err != nil || parsed == nil || parsed.User != nil || parsed.Scheme != "http" {
+		return false
+	}
+	host := strings.ToLower(strings.TrimSpace(parsed.Hostname()))
+	port := parsed.Port()
+	return port == "18318" && (host == "172.17.0.1" || host == "127.0.0.1" || host == "localhost")
 }
 
 // HttpRequest injects OpenAI-compatible credentials into the request and executes it.
@@ -158,6 +181,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs, opts.Headers)
+	forwardInternalRequestID(ctx, url, httpReq.Header)
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -370,6 +394,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs, opts.Headers)
+	forwardInternalRequestID(ctx, url, httpReq.Header)
 	httpReq.Header.Set("Accept", "text/event-stream")
 	httpReq.Header.Set("Cache-Control", "no-cache")
 	var authID, authLabel, authType, authValue string
