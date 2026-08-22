@@ -864,7 +864,7 @@ func TestProviderCredentialPolicyManualTestSuccessFailureAndFence(t *testing.T) 
 			t.Fatalf("manual success results = %+v, err=%v", results, errTest)
 		}
 		updated, _ := m.GetByID(ids[0])
-		if updated == nil || updated.Quota.Exceeded || updated.Quota.Reason != providerCredentialPolicyQuotaReason || updated.Quota.BackoffLevel != 2 || updated.Unavailable {
+		if updated == nil || updated.Quota.Exceeded || updated.Quota.Reason != "" || updated.Quota.BackoffLevel != 0 || updated.Unavailable {
 			t.Fatalf("manual success did not clear penalty: %+v", updated)
 		}
 		if models := executor.Models(); len(models) != 1 || models[0] != "upstream-model" {

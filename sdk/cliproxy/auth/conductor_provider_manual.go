@@ -335,7 +335,7 @@ func (m *Manager) finishProviderCredentialManualSuccess(ctx context.Context, can
 		m.mu.Unlock()
 		return false, "stale"
 	}
-	if !recoverProviderCredentialPolicyState(auth, now) {
+	if !clearProviderCredentialPolicyState(auth, now) {
 		m.mu.Unlock()
 		return false, "stale"
 	}
