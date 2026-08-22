@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -14,7 +15,17 @@ func TestGetOpenAICompatIncludesDisableCooling(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 
 	requestRetry := 0
+	maxRetryCredentials := 4
 	disableCooling := true
+	credentialPolicy := &config.OpenAICompatibilityCredentialPolicy{
+		ScopeStatuses:          []int{http.StatusUnauthorized, http.StatusPaymentRequired},
+		InitialCooldownSeconds: 60,
+		MaxCooldownSeconds:     21600,
+		BackoffFactor:          5,
+		ProbeModel:             "mistral-small-latest",
+		ProbeIntervalSeconds:   5,
+		ProbeConcurrency:       4,
+	}
 	h := NewHandlerWithoutConfigFilePath(&config.Config{
 		OpenAICompatibility: []config.OpenAICompatibility{
 			{
@@ -29,6 +40,8 @@ func TestGetOpenAICompatIncludesDisableCooling(t *testing.T) {
 				SupportPromptCacheKey: true,
 				DisableCooling:        &disableCooling,
 				RequestRetry:          &requestRetry,
+				MaxRetryCredentials:   &maxRetryCredentials,
+				CredentialPolicy:      credentialPolicy,
 			},
 		},
 	}, nil)
@@ -44,9 +57,11 @@ func TestGetOpenAICompatIncludesDisableCooling(t *testing.T) {
 
 	var body struct {
 		OpenAICompatibility []struct {
-			SupportPromptCacheKey *bool `json:"support-prompt-cache-key"`
-			DisableCooling        *bool `json:"disable-cooling"`
-			RequestRetry          *int  `json:"request-retry"`
+			SupportPromptCacheKey *bool                                       `json:"support-prompt-cache-key"`
+			DisableCooling        *bool                                       `json:"disable-cooling"`
+			RequestRetry          *int                                        `json:"request-retry"`
+			MaxRetryCredentials   *int                                        `json:"max-retry-credentials"`
+			CredentialPolicy      *config.OpenAICompatibilityCredentialPolicy `json:"credential-policy"`
 		} `json:"openai-compatibility"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
@@ -63,5 +78,54 @@ func TestGetOpenAICompatIncludesDisableCooling(t *testing.T) {
 	}
 	if body.OpenAICompatibility[0].RequestRetry == nil || *body.OpenAICompatibility[0].RequestRetry != 0 {
 		t.Fatalf("expected request-retry to be present and 0, got %#v", body.OpenAICompatibility[0].RequestRetry)
+	}
+	if body.OpenAICompatibility[0].MaxRetryCredentials == nil || *body.OpenAICompatibility[0].MaxRetryCredentials != 4 {
+		t.Fatalf("expected max-retry-credentials to be present and 4, got %#v", body.OpenAICompatibility[0].MaxRetryCredentials)
+	}
+	if policy := body.OpenAICompatibility[0].CredentialPolicy; policy == nil || len(policy.ScopeStatuses) != 2 || policy.BackoffFactor != 5 || policy.ProbeConcurrency != 4 {
+		t.Fatalf("expected credential-policy to be present, got %#v", policy)
+	}
+}
+
+func TestPatchOpenAICompatCredentialPolicy(t *testing.T) {
+	cfg := &config.Config{OpenAICompatibility: []config.OpenAICompatibility{{
+		Name:          "mistral",
+		BaseURL:       "https://api.mistral.ai/v1",
+		APIKeyEntries: []config.OpenAICompatibilityAPIKey{{APIKey: "test-key"}},
+	}}}
+	h := &Handler{cfg: cfg, configFilePath: writeTestConfigFile(t)}
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodPatch, "/v0/management/openai-compatibility", strings.NewReader(`{
+  "index": 0,
+  "value": {
+    "max-retry-credentials": 4,
+    "credential-policy": {
+      "scope-statuses": [402, 401, 402, 200],
+      "initial-cooldown-seconds": 60,
+      "max-cooldown-seconds": 21600,
+      "backoff-factor": 5,
+      "probe-model": " mistral-small-latest ",
+      "probe-interval-seconds": 5,
+      "probe-concurrency": 4
+    }
+  }
+}`))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+	h.PatchOpenAICompat(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("patch status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	entry := cfg.OpenAICompatibility[0]
+	if entry.MaxRetryCredentials == nil || *entry.MaxRetryCredentials != 4 {
+		t.Fatalf("max-retry-credentials = %v, want 4", entry.MaxRetryCredentials)
+	}
+	policy := entry.CredentialPolicy
+	if policy == nil || len(policy.ScopeStatuses) != 2 || policy.ScopeStatuses[0] != 401 || policy.ScopeStatuses[1] != 402 {
+		t.Fatalf("credential-policy statuses = %#v", policy)
+	}
+	if policy.ProbeModel != "mistral-small-latest" || policy.BackoffFactor != 5 || policy.ProbeConcurrency != 4 {
+		t.Fatalf("credential-policy = %#v", policy)
 	}
 }

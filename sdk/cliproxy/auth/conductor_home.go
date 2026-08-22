@@ -1353,7 +1353,7 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 				if ra := retryAfterFromError(errExec); ra != nil {
 					result.RetryAfter = ra
 				}
-				if isCredentialScopedError(errExec) {
+				if m.isCredentialScopedFailure(c.auth, errExec) {
 					result.CredentialScope = true
 				}
 				m.MarkResult(creditsCtx, result)

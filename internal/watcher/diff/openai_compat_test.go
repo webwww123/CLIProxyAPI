@@ -51,6 +51,30 @@ func TestDiffOpenAICompatibilityPromptCacheKey(t *testing.T) {
 	expectContains(t, changes, "provider updated: provider-a (support-prompt-cache-key false -> true)")
 }
 
+func TestDiffOpenAICompatibilityCredentialPolicy(t *testing.T) {
+	oldMax := 1
+	newMax := 4
+	oldList := []config.OpenAICompatibility{{
+		Name:                "provider-a",
+		MaxRetryCredentials: &oldMax,
+		CredentialPolicy: &config.OpenAICompatibilityCredentialPolicy{
+			ScopeStatuses:          []int{402},
+			InitialCooldownSeconds: 60,
+		},
+	}}
+	newList := []config.OpenAICompatibility{{
+		Name:                "provider-a",
+		MaxRetryCredentials: &newMax,
+		CredentialPolicy: &config.OpenAICompatibilityCredentialPolicy{
+			ScopeStatuses:          []int{401, 402},
+			InitialCooldownSeconds: 300,
+		},
+	}}
+
+	changes := DiffOpenAICompatibility(oldList, newList)
+	expectContains(t, changes, "provider updated: provider-a (max-retry-credentials 1 -> 4, credential-policy updated)")
+}
+
 func TestDiffOpenAICompatibilityDuplicateNames(t *testing.T) {
 	oldList := []config.OpenAICompatibility{
 		{Name: "duplicate", SupportPromptCacheKey: false},

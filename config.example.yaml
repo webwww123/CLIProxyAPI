@@ -616,6 +616,15 @@ nonstream-keepalive-interval: 0
 #     support-prompt-cache-key: false # optional: derive prompt_cache_key for requests from all input protocols
 #     disable-cooling: false # optional provider override: true disables cooling, false enables it; omit to inherit global
 #     request-retry: 3 # optional per-provider override; 0 disables additional rounds; omit or set < 0 to inherit global
+#     max-retry-credentials: 4 # optional per-provider, per-round credential cap for single-provider routes; 0 tries all; omit or set < 0 to inherit global
+#     credential-policy: # optional auth-wide isolation and automatic recovery for credential failures
+#       scope-statuses: [401, 402] # matching responses immediately rotate to another key and cool the whole credential
+#       initial-cooldown-seconds: 60
+#       max-cooldown-seconds: 21600
+#       backoff-factor: 5 # repeated post-expiry failures increase cooldown up to the maximum
+#       probe-model: "mistral-small-latest" # optional: one-token chat probe near expiry; omit to re-admit without a probe
+#       probe-interval-seconds: 5 # schedule the probe this many seconds before expiry, but execute it at the recovery deadline
+#       probe-concurrency: 4
 #     request-scoped-errors: # optional: custom rules to classify upstream errors by status and body patterns
 #       - status: 400
 #         match:

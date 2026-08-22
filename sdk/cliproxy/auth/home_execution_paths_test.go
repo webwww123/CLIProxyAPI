@@ -900,6 +900,35 @@ func TestHomeNonstreamAndCountUseOneModelPerSelection(t *testing.T) {
 	}
 }
 
+func TestHomeExecutionHonorsProviderMaxRetryCredentials(t *testing.T) {
+	maxRetryCredentials := 1
+	dispatcher := &homePerSelectionDispatcher{auths: []Auth{
+		{ID: "home-auth-a", Provider: "home-pool", Status: StatusActive, Attributes: map[string]string{"api_key": "test-key", "compat_name": "pool", "provider_key": openAICompatPoolProviderKey}},
+		{ID: "home-auth-b", Provider: "home-pool", Status: StatusActive, Attributes: map[string]string{"api_key": "test-key", "compat_name": "pool", "provider_key": openAICompatPoolProviderKey}},
+	}}
+	manager := NewManager(nil, nil, nil)
+	manager.SetConfig(&internalconfig.Config{
+		Home: internalconfig.HomeConfig{Enabled: true},
+		OpenAICompatibility: []internalconfig.OpenAICompatibility{{
+			Name:                "pool",
+			MaxRetryCredentials: &maxRetryCredentials,
+			Models:              []internalconfig.OpenAICompatibilityModel{{Name: "upstream", Alias: "requested"}},
+		}},
+	})
+	manager.SetRetryConfig(0, time.Second, 2)
+	manager.PublishHomeDispatch(dispatcher, executionregistry.New(), 1)
+	executor := &homePerSelectionFailureExecutor{dispatcher: dispatcher}
+	manager.RegisterExecutor(executor)
+
+	_, errExecute := manager.Execute(context.Background(), []string{openAICompatPoolProviderKey}, cliproxyexecutor.Request{Model: "requested"}, cliproxyexecutor.Options{})
+	if errExecute == nil {
+		t.Fatal("Execute() error = nil, want upstream failure")
+	}
+	if len(executor.invocations) != 1 {
+		t.Fatalf("upstream invocations = %v, want provider cap of 1", executor.invocations)
+	}
+}
+
 func TestHomeStreamEndsOnErrorChunk(t *testing.T) {
 	manager := NewManager(nil, nil, nil)
 	manager.SetConfig(&internalconfig.Config{Home: internalconfig.HomeConfig{Enabled: true}})

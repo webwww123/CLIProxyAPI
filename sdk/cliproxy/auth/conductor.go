@@ -161,6 +161,10 @@ type Manager struct {
 	// refreshLocks serializes credential refresh per auth ID so concurrent
 	// 401 recoveries and auto-refresh workers do not race the same refresh_token.
 	refreshLocks sync.Map
+
+	credentialProbeMu               sync.Mutex
+	credentialProbeInFlight         map[string]string
+	credentialProbeProviderInFlight map[string]int
 }
 
 // NewManager constructs a manager with optional custom selector and hook.
@@ -172,16 +176,18 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 		hook = NoopHook{}
 	}
 	manager := &Manager{
-		store:                 store,
-		executors:             make(map[string]ProviderExecutor),
-		selector:              selector,
-		hook:                  hook,
-		auths:                 make(map[string]*Auth),
-		homeRuntimeAuths:      make(map[string]map[string]*Auth),
-		homeRuntimeAuthOwners: make(map[string]map[string]*HomeDispatchSelection),
-		homeSessionSelections: make(map[string]map[homeSessionSelectionKey]*HomeDispatchSelection),
-		providerOffsets:       make(map[string]int),
-		modelPoolOffsets:      make(map[string]int),
+		store:                           store,
+		executors:                       make(map[string]ProviderExecutor),
+		selector:                        selector,
+		hook:                            hook,
+		auths:                           make(map[string]*Auth),
+		homeRuntimeAuths:                make(map[string]map[string]*Auth),
+		homeRuntimeAuthOwners:           make(map[string]map[string]*HomeDispatchSelection),
+		homeSessionSelections:           make(map[string]map[homeSessionSelectionKey]*HomeDispatchSelection),
+		providerOffsets:                 make(map[string]int),
+		modelPoolOffsets:                make(map[string]int),
+		credentialProbeInFlight:         make(map[string]string),
+		credentialProbeProviderInFlight: make(map[string]int),
 	}
 	// atomic.Value requires non-nil initial value.
 	manager.runtimeConfig.Store(&internalconfig.Config{})

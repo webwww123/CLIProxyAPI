@@ -39,19 +39,21 @@ type openAICompatibilityAPIKeyWithAuthIndex struct {
 }
 
 type openAICompatibilityWithAuthIndex struct {
-	Name                  string                                   `json:"name"`
-	Priority              int                                      `json:"priority,omitempty"`
-	Disabled              bool                                     `json:"disabled"`
-	Prefix                string                                   `json:"prefix,omitempty"`
-	BaseURL               string                                   `json:"base-url"`
-	APIKeyEntries         []openAICompatibilityAPIKeyWithAuthIndex `json:"api-key-entries,omitempty"`
-	Models                []config.OpenAICompatibilityModel        `json:"models,omitempty"`
-	Headers               map[string]string                        `json:"headers,omitempty"`
-	SupportPromptCacheKey bool                                     `json:"support-prompt-cache-key,omitempty"`
-	DisableCooling        *bool                                    `json:"disable-cooling,omitempty"`
-	RequestRetry          *int                                     `json:"request-retry,omitempty"`
-	RequestScopedErrors   []config.RequestScopedErrorRule          `json:"request-scoped-errors,omitempty"`
-	AuthIndex             string                                   `json:"auth-index,omitempty"`
+	Name                  string                                      `json:"name"`
+	Priority              int                                         `json:"priority,omitempty"`
+	Disabled              bool                                        `json:"disabled"`
+	Prefix                string                                      `json:"prefix,omitempty"`
+	BaseURL               string                                      `json:"base-url"`
+	APIKeyEntries         []openAICompatibilityAPIKeyWithAuthIndex    `json:"api-key-entries,omitempty"`
+	Models                []config.OpenAICompatibilityModel           `json:"models,omitempty"`
+	Headers               map[string]string                           `json:"headers,omitempty"`
+	SupportPromptCacheKey bool                                        `json:"support-prompt-cache-key,omitempty"`
+	DisableCooling        *bool                                       `json:"disable-cooling,omitempty"`
+	RequestRetry          *int                                        `json:"request-retry,omitempty"`
+	MaxRetryCredentials   *int                                        `json:"max-retry-credentials,omitempty"`
+	CredentialPolicy      *config.OpenAICompatibilityCredentialPolicy `json:"credential-policy,omitempty"`
+	RequestScopedErrors   []config.RequestScopedErrorRule             `json:"request-scoped-errors,omitempty"`
+	AuthIndex             string                                      `json:"auth-index,omitempty"`
 }
 
 func (h *Handler) liveAuthIndexByID() map[string]string {
@@ -311,6 +313,8 @@ func (h *Handler) openAICompatibilityWithAuthIndex() []openAICompatibilityWithAu
 			SupportPromptCacheKey: entry.SupportPromptCacheKey,
 			DisableCooling:        entry.DisableCooling,
 			RequestRetry:          entry.RequestRetry,
+			MaxRetryCredentials:   entry.MaxRetryCredentials,
+			CredentialPolicy:      entry.CredentialPolicy,
 			RequestScopedErrors:   entry.RequestScopedErrors,
 			AuthIndex:             "",
 		}

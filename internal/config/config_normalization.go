@@ -164,6 +164,7 @@ func (cfg *Config) SanitizeOpenAICompatibility() {
 		e.Prefix = normalizeModelPrefix(e.Prefix)
 		e.BaseURL = strings.TrimSpace(e.BaseURL)
 		e.Headers = NormalizeHeaders(e.Headers)
+		e.CredentialPolicy = NormalizeOpenAICompatibilityCredentialPolicy(e.CredentialPolicy)
 		if e.BaseURL == "" {
 			// Skip providers with no base-url; treated as removed
 			continue
@@ -171,6 +172,74 @@ func (cfg *Config) SanitizeOpenAICompatibility() {
 		out = append(out, e)
 	}
 	cfg.OpenAICompatibility = out
+}
+
+// NormalizeOpenAICompatibilityCredentialPolicy validates and defaults an opt-in
+// OpenAI-compatible credential policy. A policy with no valid status codes is disabled.
+func NormalizeOpenAICompatibilityCredentialPolicy(policy *OpenAICompatibilityCredentialPolicy) *OpenAICompatibilityCredentialPolicy {
+	if policy == nil {
+		return nil
+	}
+	normalized := *policy
+	statuses := make([]int, 0, len(policy.ScopeStatuses))
+	seen := make(map[int]struct{}, len(policy.ScopeStatuses))
+	for _, status := range policy.ScopeStatuses {
+		if status < 400 || status > 599 {
+			continue
+		}
+		if _, ok := seen[status]; ok {
+			continue
+		}
+		seen[status] = struct{}{}
+		statuses = append(statuses, status)
+	}
+	if len(statuses) == 0 {
+		return nil
+	}
+	sort.Ints(statuses)
+	normalized.ScopeStatuses = statuses
+
+	if normalized.InitialCooldownSeconds <= 0 {
+		normalized.InitialCooldownSeconds = 60
+	}
+	if normalized.InitialCooldownSeconds > 7*24*60*60 {
+		normalized.InitialCooldownSeconds = 7 * 24 * 60 * 60
+	}
+	if normalized.MaxCooldownSeconds <= 0 {
+		normalized.MaxCooldownSeconds = 30 * 60
+	}
+	if normalized.MaxCooldownSeconds < normalized.InitialCooldownSeconds {
+		normalized.MaxCooldownSeconds = normalized.InitialCooldownSeconds
+	}
+	if normalized.MaxCooldownSeconds > 7*24*60*60 {
+		normalized.MaxCooldownSeconds = 7 * 24 * 60 * 60
+	}
+	if normalized.BackoffFactor < 2 {
+		normalized.BackoffFactor = 2
+	}
+	if normalized.BackoffFactor > 16 {
+		normalized.BackoffFactor = 16
+	}
+
+	normalized.ProbeModel = strings.TrimSpace(normalized.ProbeModel)
+	if normalized.ProbeModel == "" {
+		normalized.ProbeIntervalSeconds = 0
+		normalized.ProbeConcurrency = 0
+		return &normalized
+	}
+	if normalized.ProbeIntervalSeconds <= 0 {
+		normalized.ProbeIntervalSeconds = 5
+	}
+	if normalized.ProbeIntervalSeconds > 300 {
+		normalized.ProbeIntervalSeconds = 300
+	}
+	if normalized.ProbeConcurrency <= 0 {
+		normalized.ProbeConcurrency = 2
+	}
+	if normalized.ProbeConcurrency > 64 {
+		normalized.ProbeConcurrency = 64
+	}
+	return &normalized
 }
 
 // SanitizeCodexKeys removes Codex API key entries missing a BaseURL.

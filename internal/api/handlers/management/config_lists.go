@@ -792,17 +792,19 @@ func (h *Handler) PutOpenAICompat(c *gin.Context) {
 }
 func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 	type openAICompatPatch struct {
-		Name                  *string                             `json:"name"`
-		Prefix                *string                             `json:"prefix"`
-		Disabled              *bool                               `json:"disabled"`
-		DisableCooling        json.RawMessage                     `json:"disable-cooling"`
-		BaseURL               *string                             `json:"base-url"`
-		APIKeyEntries         *[]config.OpenAICompatibilityAPIKey `json:"api-key-entries"`
-		Models                *[]config.OpenAICompatibilityModel  `json:"models"`
-		Headers               *map[string]string                  `json:"headers"`
-		SupportPromptCacheKey *bool                               `json:"support-prompt-cache-key"`
-		RequestRetry          *int                                `json:"request-retry"`
-		RequestScopedErrors   *[]config.RequestScopedErrorRule    `json:"request-scoped-errors"`
+		Name                  *string                                     `json:"name"`
+		Prefix                *string                                     `json:"prefix"`
+		Disabled              *bool                                       `json:"disabled"`
+		DisableCooling        json.RawMessage                             `json:"disable-cooling"`
+		BaseURL               *string                                     `json:"base-url"`
+		APIKeyEntries         *[]config.OpenAICompatibilityAPIKey         `json:"api-key-entries"`
+		Models                *[]config.OpenAICompatibilityModel          `json:"models"`
+		Headers               *map[string]string                          `json:"headers"`
+		SupportPromptCacheKey *bool                                       `json:"support-prompt-cache-key"`
+		RequestRetry          *int                                        `json:"request-retry"`
+		MaxRetryCredentials   *int                                        `json:"max-retry-credentials"`
+		CredentialPolicy      *config.OpenAICompatibilityCredentialPolicy `json:"credential-policy"`
+		RequestScopedErrors   *[]config.RequestScopedErrorRule            `json:"request-scoped-errors"`
 	}
 	var body struct {
 		Name  *string            `json:"name"`
@@ -849,6 +851,12 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 	}
 	if body.Value.RequestRetry != nil {
 		entry.RequestRetry = body.Value.RequestRetry
+	}
+	if body.Value.MaxRetryCredentials != nil {
+		entry.MaxRetryCredentials = body.Value.MaxRetryCredentials
+	}
+	if body.Value.CredentialPolicy != nil {
+		entry.CredentialPolicy = config.NormalizeOpenAICompatibilityCredentialPolicy(body.Value.CredentialPolicy)
 	}
 	if body.Value.BaseURL != nil {
 		trimmed := strings.TrimSpace(*body.Value.BaseURL)
@@ -1793,6 +1801,7 @@ func normalizeOpenAICompatibilityEntry(entry *config.OpenAICompatibility) {
 	// Trim base-url; empty base-url indicates provider should be removed by sanitization
 	entry.BaseURL = strings.TrimSpace(entry.BaseURL)
 	entry.Headers = config.NormalizeHeaders(entry.Headers)
+	entry.CredentialPolicy = config.NormalizeOpenAICompatibilityCredentialPolicy(entry.CredentialPolicy)
 	existing := make(map[string]struct{}, len(entry.APIKeyEntries))
 	for i := range entry.APIKeyEntries {
 		trimmed := strings.TrimSpace(entry.APIKeyEntries[i].APIKey)
@@ -1815,6 +1824,11 @@ func normalizedOpenAICompatibilityEntries(entries []config.OpenAICompatibility) 
 		}
 		if len(copyEntry.RequestScopedErrors) > 0 {
 			copyEntry.RequestScopedErrors = append([]config.RequestScopedErrorRule(nil), copyEntry.RequestScopedErrors...)
+		}
+		if copyEntry.CredentialPolicy != nil {
+			policy := *copyEntry.CredentialPolicy
+			policy.ScopeStatuses = append([]int(nil), policy.ScopeStatuses...)
+			copyEntry.CredentialPolicy = &policy
 		}
 		normalizeOpenAICompatibilityEntry(&copyEntry)
 		out[i] = copyEntry

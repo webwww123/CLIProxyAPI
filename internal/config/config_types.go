@@ -683,8 +683,42 @@ type OpenAICompatibility struct {
 	// Nil or a negative value means "use the global request-retry". 0 disables additional retry rounds.
 	RequestRetry *int `yaml:"request-retry,omitempty" json:"request-retry,omitempty"`
 
+	// MaxRetryCredentials optionally overrides the global per-round credential attempt limit
+	// when a request resolves to this provider only. Nil or a negative value inherits the
+	// global value. 0 tries every eligible credential.
+	MaxRetryCredentials *int `yaml:"max-retry-credentials,omitempty" json:"max-retry-credentials,omitempty"`
+
+	// CredentialPolicy configures auth-wide cooldown, backoff, and recovery probes for
+	// status codes that indicate a failed credential rather than a failed model.
+	CredentialPolicy *OpenAICompatibilityCredentialPolicy `yaml:"credential-policy,omitempty" json:"credential-policy,omitempty"`
+
 	// RequestScopedErrors configures custom classification rules for upstream errors.
 	RequestScopedErrors []RequestScopedErrorRule `yaml:"request-scoped-errors,omitempty" json:"request-scoped-errors,omitempty"`
+}
+
+// OpenAICompatibilityCredentialPolicy controls provider-specific credential lifecycle behavior.
+// It is opt-in and only applies to the OpenAI-compatible provider that contains it.
+type OpenAICompatibilityCredentialPolicy struct {
+	// ScopeStatuses marks HTTP statuses as failures of the whole credential across models.
+	ScopeStatuses []int `yaml:"scope-statuses,omitempty" json:"scope-statuses,omitempty"`
+
+	// InitialCooldownSeconds is the first cooldown after a matching credential failure.
+	InitialCooldownSeconds int `yaml:"initial-cooldown-seconds,omitempty" json:"initial-cooldown-seconds,omitempty"`
+
+	// MaxCooldownSeconds caps repeated-failure backoff.
+	MaxCooldownSeconds int `yaml:"max-cooldown-seconds,omitempty" json:"max-cooldown-seconds,omitempty"`
+
+	// BackoffFactor multiplies the cooldown after each post-expiry failure.
+	BackoffFactor int `yaml:"backoff-factor,omitempty" json:"backoff-factor,omitempty"`
+
+	// ProbeModel enables an automatic one-token chat-completions probe near cooldown expiry.
+	ProbeModel string `yaml:"probe-model,omitempty" json:"probe-model,omitempty"`
+
+	// ProbeIntervalSeconds controls the near-expiry scheduling window and lease cadence.
+	ProbeIntervalSeconds int `yaml:"probe-interval-seconds,omitempty" json:"probe-interval-seconds,omitempty"`
+
+	// ProbeConcurrency limits simultaneous recovery probes for this provider.
+	ProbeConcurrency int `yaml:"probe-concurrency,omitempty" json:"probe-concurrency,omitempty"`
 }
 
 // OpenAICompatibilityAPIKey represents an API key configuration with optional proxy setting.

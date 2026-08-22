@@ -15,7 +15,7 @@ func (m *Manager) executeHome(ctx context.Context, providers []string, req clipr
 	if unlockSession := m.lockHomeWebsocketSession(ctx, opts); unlockSession != nil {
 		defer unlockSession()
 	}
-	defaultRequestRetry, maxRetryCredentials, maxWait := m.retrySettings()
+	defaultRequestRetry, maxRetryCredentials, maxWait := m.retrySettingsForProviders(providers)
 	retryModel := authSelectionModelFromOptions(opts, req.Model)
 	homeRetryLimit := -1
 	attempt := 0
@@ -258,7 +258,7 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 			}
 			result.Error = resultErrorFromError(errExecute)
 			result.RetryAfter = retryAfterFromError(errExecute)
-			if isCredentialScopedError(errExecute) {
+			if m.isCredentialScopedFailure(preparedAuth, errExecute) {
 				result.CredentialScope = true
 			}
 			action, okAction := matchRequestScopedErrorAction(preparedAuth, errExecute, m.runtimeConfigSnapshot())

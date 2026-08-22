@@ -49,7 +49,7 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 		return resp, unwrapRequestStopError(errHome)
 	}
 
-	defaultRequestRetry, maxRetryCredentials, maxWait := m.retrySettings()
+	defaultRequestRetry, maxRetryCredentials, maxWait := m.retrySettingsForProviders(normalized)
 
 	var lastErr error
 	retryModel := authSelectionModelFromOptions(opts, req.Model)
@@ -96,7 +96,7 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 		return resp, unwrapRequestStopError(errHome)
 	}
 
-	defaultRequestRetry, maxRetryCredentials, maxWait := m.retrySettings()
+	defaultRequestRetry, maxRetryCredentials, maxWait := m.retrySettingsForProviders(normalized)
 
 	var lastErr error
 	retryModel := authSelectionModelFromOptions(opts, req.Model)
@@ -137,7 +137,7 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 		return nil, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
 
-	defaultRequestRetry, maxRetryCredentials, maxWait := m.retrySettings()
+	defaultRequestRetry, maxRetryCredentials, maxWait := m.retrySettingsForProviders(normalized)
 
 	var lastErr error
 	homeRetryLimit := -1
@@ -416,7 +416,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				if ra := retryAfterFromError(errExec); ra != nil {
 					result.RetryAfter = ra
 				}
-				if isCredentialScopedError(errExec) {
+				if m.isCredentialScopedFailure(auth, errExec) {
 					result.CredentialScope = true
 				}
 				action, okAction := matchRequestScopedErrorAction(auth, errExec, m.runtimeConfigSnapshot())
@@ -599,7 +599,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				if isCountTokensEndpointNotFoundError(errExec, execReq.Model) && (result.Error == nil || result.Error.Code != ErrorCodeForceCooldown) {
 					m.recordAvailabilityNeutralResult(execCtx, result)
 				} else {
-					if isCredentialScopedError(errExec) {
+					if m.isCredentialScopedFailure(auth, errExec) {
 						result.CredentialScope = true
 					}
 					m.MarkResult(execCtx, result)

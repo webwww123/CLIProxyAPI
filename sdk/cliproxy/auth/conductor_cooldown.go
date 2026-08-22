@@ -18,6 +18,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	log "github.com/sirupsen/logrus"
 )
 
 var quotaCooldownDisabled atomic.Bool
@@ -275,7 +276,7 @@ func (m *Manager) clearDisabledCooldownStates(cfg *internalconfig.Config) bool {
 	return len(snapshots) > 0
 }
 
-// RestoreCooldownStates restores unexpired persisted cooldown records into registered auths.
+// RestoreCooldownStates restores persisted cooldown records into registered auths.
 func (m *Manager) RestoreCooldownStates(ctx context.Context) error {
 	if m == nil {
 		return nil
@@ -333,12 +334,26 @@ func (m *Manager) RestoreCooldownStates(ctx context.Context) error {
 
 func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now time.Time) bool {
 	authID := strings.TrimSpace(record.AuthID)
-	if authID == "" || record.NextRetryAfter.IsZero() || !record.NextRetryAfter.After(now) {
+	if authID == "" || record.NextRetryAfter.IsZero() {
 		return false
 	}
 	auth := m.auths[authID]
 	if auth == nil || auth.Disabled || auth.Status == StatusDisabled || m.cooldownDisabledForAuth(auth) {
 		return false
+	}
+	if !record.NextRetryAfter.After(now) {
+		policy := m.providerCredentialPolicyForAuth(auth)
+		if strings.TrimSpace(record.Model) != "" || !strings.EqualFold(strings.TrimSpace(record.Quota.Reason), providerCredentialPolicyQuotaReason) || !providerCredentialProbeEnabled(policy) {
+			return false
+		}
+		expiredDeadline := record.NextRetryAfter
+		record.NextRetryAfter = now.Add(providerCredentialProbeLease(policy))
+		record.Quota.Exceeded = true
+		record.Quota.Reason = providerCredentialPolicyQuotaReason
+		if record.Quota.NextRecoverAt.IsZero() {
+			record.Quota.NextRecoverAt = expiredDeadline
+		}
+		record.UpdatedAt = now
 	}
 	updatedAt := record.UpdatedAt
 	if updatedAt.IsZero() {
@@ -714,6 +729,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	setModelQuota := false
 	var authSnapshot *Auth
 	cooldownStateChanged := false
+	var credentialPolicyLog *providerCredentialPolicyLogEntry
 
 	m.mu.Lock()
 	if auth, ok := m.auths[result.AuthID]; ok && auth != nil {
@@ -731,7 +747,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		}
 
 		if result.Success {
-			if auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now) {
+			if credentialWideQuotaActive(auth, now) {
 				// Retain active credential-scoped cooldown
 			} else if modelKey != "" {
 				state := ensureModelState(auth, modelKey)
@@ -749,7 +765,33 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				clearAuthStateOnSuccess(auth, now)
 			}
 		} else {
-			if modelKey != "" {
+			handledCredentialPolicy := false
+			if result.CredentialScope && result.Error != nil && !shouldSkipCredentialCooldown(result.Error) {
+				policy := m.providerCredentialPolicyForAuth(auth)
+				status := statusCodeFromResult(result.Error)
+				if providerCredentialPolicyMatchesStatus(policy, status) {
+					disableCooling := m.cooldownDisabledForAuth(auth)
+					if result.Error.Code == ErrorCodeForceCooldown {
+						disableCooling = false
+					}
+					if !disableCooling {
+						cooldown, backoffLevel, stateChanged := applyProviderCredentialPolicyFailureState(auth, result.Error, policy, now)
+						if stateChanged {
+							credentialPolicyLog = &providerCredentialPolicyLogEntry{
+								provider:      auth.Provider,
+								credentialRef: stableCredentialRef(auth),
+								status:        status,
+								cooldown:      cooldown,
+								backoffLevel:  backoffLevel,
+							}
+						}
+						handledCredentialPolicy = true
+					}
+				}
+			}
+			if handledCredentialPolicy {
+				// Auth-wide policy state replaces the normal model-level cooldown.
+			} else if modelKey != "" {
 				if !shouldSkipCredentialCooldown(result.Error) {
 					disableCooling := m.cooldownDisabledForAuth(auth)
 					if result.Error != nil && result.Error.Code == ErrorCodeForceCooldown {
@@ -913,6 +955,15 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		}
 	}
 	m.mu.Unlock()
+	if credentialPolicyLog != nil {
+		logEntryWithRequestID(ctx).WithFields(log.Fields{
+			"provider":       credentialPolicyLog.provider,
+			"credential_ref": credentialPolicyLog.credentialRef,
+			"status":         credentialPolicyLog.status,
+			"cooldown":       credentialPolicyLog.cooldown.Round(time.Second).String(),
+			"backoff_level":  credentialPolicyLog.backoffLevel,
+		}).Warn("provider credential policy cooldown applied")
+	}
 	if m.scheduler != nil && authSnapshot != nil {
 		m.scheduler.upsertAuth(authSnapshot)
 	}
@@ -1128,7 +1179,7 @@ func updateAggregatedAvailability(auth *Auth, now time.Time) {
 	if auth == nil {
 		return
 	}
-	if auth.Quota.Exceeded && auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now) {
+	if credentialWideQuotaActive(auth, now) {
 		auth.Unavailable = true
 		return
 	}
