@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"net/http"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -275,6 +276,47 @@ func TestProviderCredentialPolicy_PersistsCredentialWideCooldown(t *testing.T) {
 	}
 	if got := store.saveCount.Load(); got != firstSaveCount {
 		t.Fatalf("duplicate in-window failure persisted cooldown %d times, want %d", got, firstSaveCount)
+	}
+}
+
+func TestProviderCredentialPolicy_LogMessageContainsSafeDiagnostics(t *testing.T) {
+	hook := setupTestLoggerHook(t)
+	policy := &internalconfig.OpenAICompatibilityCredentialPolicy{
+		ScopeStatuses:          []int{http.StatusPaymentRequired},
+		InitialCooldownSeconds: 60,
+		MaxCooldownSeconds:     3600,
+		BackoffFactor:          2,
+	}
+	executor := &providerCredentialPolicyExecutor{}
+	m, ids := newProviderCredentialPolicyManager(t, 1, policy, executor, 1)
+	m.MarkResult(context.Background(), Result{
+		AuthID:          ids[0],
+		Provider:        executor.provider,
+		Model:           "test-model",
+		Success:         false,
+		CredentialScope: true,
+		Error:           &Error{HTTPStatus: http.StatusPaymentRequired, Message: "sensitive upstream detail"},
+	})
+
+	entries := hook.AllEntries()
+	if len(entries) == 0 {
+		t.Fatal("credential policy warning was not logged")
+	}
+	message := entries[len(entries)-1].Message
+	wantParts := []string{
+		"provider credential policy cooldown applied",
+		"credential_ref=" + stableCredentialRef(&Auth{ID: ids[0]}),
+		"status=402",
+		"cooldown=1m0s",
+		"backoff_level=1",
+	}
+	for _, want := range wantParts {
+		if !strings.Contains(message, want) {
+			t.Fatalf("log message %q does not contain %q", message, want)
+		}
+	}
+	if strings.Contains(message, "sensitive upstream detail") || strings.Contains(message, ids[0]) {
+		t.Fatalf("log message leaked sensitive or raw credential data: %q", message)
 	}
 }
 

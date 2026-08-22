@@ -385,14 +385,32 @@ func (m *Manager) finishProviderCredentialProbe(authID string, policy internalco
 		"status":         status,
 	}
 	if policyDisabled {
-		log.WithFields(fields).Info("provider credential probe result discarded after policy change")
+		log.WithFields(fields).Infof(
+			"provider credential probe result discarded after policy change: credential_ref=%s probe_model=%s status=%d",
+			credentialRef,
+			effectivePolicy.ProbeModel,
+			status,
+		)
 		return
 	}
 	if probeErr == nil {
-		log.WithFields(fields).Info("provider credential probe recovered credential")
+		log.WithFields(fields).Infof(
+			"provider credential probe recovered credential: credential_ref=%s probe_model=%s status=%d",
+			credentialRef,
+			effectivePolicy.ProbeModel,
+			status,
+		)
 		return
 	}
-	fields["cooldown"] = cooldown.Round(time.Second).String()
+	cooldownText := cooldown.Round(time.Second).String()
+	fields["cooldown"] = cooldownText
 	fields["backoff_level"] = backoffLevel
-	log.WithFields(fields).Warn("provider credential probe failed")
+	log.WithFields(fields).Warnf(
+		"provider credential probe failed: credential_ref=%s probe_model=%s status=%d cooldown=%s backoff_level=%d",
+		credentialRef,
+		effectivePolicy.ProbeModel,
+		status,
+		cooldownText,
+		backoffLevel,
+	)
 }

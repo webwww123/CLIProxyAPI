@@ -956,13 +956,20 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	}
 	m.mu.Unlock()
 	if credentialPolicyLog != nil {
+		cooldownText := credentialPolicyLog.cooldown.Round(time.Second).String()
 		logEntryWithRequestID(ctx).WithFields(log.Fields{
 			"provider":       credentialPolicyLog.provider,
 			"credential_ref": credentialPolicyLog.credentialRef,
 			"status":         credentialPolicyLog.status,
-			"cooldown":       credentialPolicyLog.cooldown.Round(time.Second).String(),
+			"cooldown":       cooldownText,
 			"backoff_level":  credentialPolicyLog.backoffLevel,
-		}).Warn("provider credential policy cooldown applied")
+		}).Warnf(
+			"provider credential policy cooldown applied: credential_ref=%s status=%d cooldown=%s backoff_level=%d",
+			credentialPolicyLog.credentialRef,
+			credentialPolicyLog.status,
+			cooldownText,
+			credentialPolicyLog.backoffLevel,
+		)
 	}
 	if m.scheduler != nil && authSnapshot != nil {
 		m.scheduler.upsertAuth(authSnapshot)
