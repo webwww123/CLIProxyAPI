@@ -711,6 +711,14 @@ type OpenAICompatibilityCredentialPolicy struct {
 	// BackoffFactor multiplies the cooldown after each post-expiry failure.
 	BackoffFactor int `yaml:"backoff-factor,omitempty" json:"backoff-factor,omitempty"`
 
+	// CooldownJitterPercent applies symmetric jitter to cooldown durations so
+	// credentials that fail together do not all re-enter at the same instant.
+	CooldownJitterPercent int `yaml:"cooldown-jitter-percent,omitempty" json:"cooldown-jitter-percent,omitempty"`
+
+	// PenaltyRules optionally overrides the base cooldown ladder for matching
+	// status/body combinations. The first matching rule wins.
+	PenaltyRules []OpenAICompatibilityCredentialPolicyRule `yaml:"penalty-rules,omitempty" json:"penalty-rules,omitempty"`
+
 	// ProbeModel enables an automatic one-token chat-completions probe near cooldown expiry.
 	ProbeModel string `yaml:"probe-model,omitempty" json:"probe-model,omitempty"`
 
@@ -719,6 +727,35 @@ type OpenAICompatibilityCredentialPolicy struct {
 
 	// ProbeConcurrency limits simultaneous recovery probes for this provider.
 	ProbeConcurrency int `yaml:"probe-concurrency,omitempty" json:"probe-concurrency,omitempty"`
+
+	// ManualTestConcurrency limits simultaneous management-triggered credential tests.
+	ManualTestConcurrency int `yaml:"manual-test-concurrency,omitempty" json:"manual-test-concurrency,omitempty"`
+
+	// ManualTestMaxModels limits dynamically selected current models tried per credential.
+	ManualTestMaxModels int `yaml:"manual-test-max-models,omitempty" json:"manual-test-max-models,omitempty"`
+
+	// ManualTestTimeoutSeconds bounds each management-triggered credential test.
+	ManualTestTimeoutSeconds int `yaml:"manual-test-timeout-seconds,omitempty" json:"manual-test-timeout-seconds,omitempty"`
+}
+
+// OpenAICompatibilityCredentialPolicyRule overrides the base credential
+// cooldown ladder for one status and optional response-body patterns.
+type OpenAICompatibilityCredentialPolicyRule struct {
+	Name string `yaml:"name,omitempty" json:"name,omitempty"`
+
+	// Status is the upstream HTTP status matched by this rule.
+	Status int `yaml:"status" json:"status"`
+
+	// Match performs case-insensitive substring matching against the upstream error.
+	Match []string `yaml:"match,omitempty" json:"match,omitempty"`
+
+	// MatchRegexr performs regular-expression matching against the upstream error.
+	// The field name intentionally follows the existing request-scoped rule contract.
+	MatchRegexr []string `yaml:"match-regexr,omitempty" json:"match-regexr,omitempty"`
+
+	InitialCooldownSeconds int `yaml:"initial-cooldown-seconds,omitempty" json:"initial-cooldown-seconds,omitempty"`
+	MaxCooldownSeconds     int `yaml:"max-cooldown-seconds,omitempty" json:"max-cooldown-seconds,omitempty"`
+	BackoffFactor          int `yaml:"backoff-factor,omitempty" json:"backoff-factor,omitempty"`
 }
 
 // OpenAICompatibilityAPIKey represents an API key configuration with optional proxy setting.

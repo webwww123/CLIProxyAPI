@@ -165,6 +165,8 @@ type Manager struct {
 	credentialProbeMu               sync.Mutex
 	credentialProbeInFlight         map[string]string
 	credentialProbeProviderInFlight map[string]int
+	credentialManualTestMu          sync.Mutex
+	credentialManualTestInFlight    map[string]struct{}
 }
 
 // NewManager constructs a manager with optional custom selector and hook.
@@ -188,6 +190,7 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 		modelPoolOffsets:                make(map[string]int),
 		credentialProbeInFlight:         make(map[string]string),
 		credentialProbeProviderInFlight: make(map[string]int),
+		credentialManualTestInFlight:    make(map[string]struct{}),
 	}
 	// atomic.Value requires non-nil initial value.
 	manager.runtimeConfig.Store(&internalconfig.Config{})

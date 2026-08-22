@@ -1828,6 +1828,11 @@ func normalizedOpenAICompatibilityEntries(entries []config.OpenAICompatibility) 
 		if copyEntry.CredentialPolicy != nil {
 			policy := *copyEntry.CredentialPolicy
 			policy.ScopeStatuses = append([]int(nil), policy.ScopeStatuses...)
+			policy.PenaltyRules = append([]config.OpenAICompatibilityCredentialPolicyRule(nil), policy.PenaltyRules...)
+			for ruleIndex := range policy.PenaltyRules {
+				policy.PenaltyRules[ruleIndex].Match = append([]string(nil), copyEntry.CredentialPolicy.PenaltyRules[ruleIndex].Match...)
+				policy.PenaltyRules[ruleIndex].MatchRegexr = append([]string(nil), copyEntry.CredentialPolicy.PenaltyRules[ruleIndex].MatchRegexr...)
+			}
 			copyEntry.CredentialPolicy = &policy
 		}
 		normalizeOpenAICompatibilityEntry(&copyEntry)

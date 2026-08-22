@@ -1,10 +1,19 @@
 package config
 
 import (
+	"regexp"
 	"sort"
 	"strings"
 
 	sdkpluginstore "github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginstore"
+)
+
+const (
+	maxProviderCredentialPolicyCooldownSeconds = 10 * 24 * 60 * 60
+	maxProviderCredentialPolicyJitterPercent   = 50
+	maxProviderCredentialManualTestConcurrency = 64
+	maxProviderCredentialManualTestModels      = 10
+	maxProviderCredentialManualTestTimeout     = 300
 )
 
 // NormalizePluginsConfig applies default plugin configuration values.
@@ -193,17 +202,14 @@ func NormalizeOpenAICompatibilityCredentialPolicy(policy *OpenAICompatibilityCre
 		seen[status] = struct{}{}
 		statuses = append(statuses, status)
 	}
-	if len(statuses) == 0 {
-		return nil
-	}
 	sort.Ints(statuses)
 	normalized.ScopeStatuses = statuses
 
 	if normalized.InitialCooldownSeconds <= 0 {
 		normalized.InitialCooldownSeconds = 60
 	}
-	if normalized.InitialCooldownSeconds > 7*24*60*60 {
-		normalized.InitialCooldownSeconds = 7 * 24 * 60 * 60
+	if normalized.InitialCooldownSeconds > maxProviderCredentialPolicyCooldownSeconds {
+		normalized.InitialCooldownSeconds = maxProviderCredentialPolicyCooldownSeconds
 	}
 	if normalized.MaxCooldownSeconds <= 0 {
 		normalized.MaxCooldownSeconds = 30 * 60
@@ -211,14 +217,76 @@ func NormalizeOpenAICompatibilityCredentialPolicy(policy *OpenAICompatibilityCre
 	if normalized.MaxCooldownSeconds < normalized.InitialCooldownSeconds {
 		normalized.MaxCooldownSeconds = normalized.InitialCooldownSeconds
 	}
-	if normalized.MaxCooldownSeconds > 7*24*60*60 {
-		normalized.MaxCooldownSeconds = 7 * 24 * 60 * 60
+	if normalized.MaxCooldownSeconds > maxProviderCredentialPolicyCooldownSeconds {
+		normalized.MaxCooldownSeconds = maxProviderCredentialPolicyCooldownSeconds
 	}
 	if normalized.BackoffFactor < 2 {
 		normalized.BackoffFactor = 2
 	}
 	if normalized.BackoffFactor > 16 {
 		normalized.BackoffFactor = 16
+	}
+	if normalized.CooldownJitterPercent < 0 {
+		normalized.CooldownJitterPercent = 0
+	}
+	if normalized.CooldownJitterPercent > maxProviderCredentialPolicyJitterPercent {
+		normalized.CooldownJitterPercent = maxProviderCredentialPolicyJitterPercent
+	}
+
+	rules := make([]OpenAICompatibilityCredentialPolicyRule, 0, len(policy.PenaltyRules))
+	for _, configuredRule := range policy.PenaltyRules {
+		if configuredRule.Status < 400 || configuredRule.Status > 599 {
+			continue
+		}
+		rule := configuredRule
+		rule.Name = strings.TrimSpace(rule.Name)
+		rule.Match = normalizeCredentialPolicyPatterns(rule.Match, false)
+		rule.MatchRegexr = normalizeCredentialPolicyPatterns(rule.MatchRegexr, true)
+		if rule.InitialCooldownSeconds <= 0 {
+			rule.InitialCooldownSeconds = normalized.InitialCooldownSeconds
+		}
+		if rule.InitialCooldownSeconds > maxProviderCredentialPolicyCooldownSeconds {
+			rule.InitialCooldownSeconds = maxProviderCredentialPolicyCooldownSeconds
+		}
+		if rule.MaxCooldownSeconds <= 0 {
+			rule.MaxCooldownSeconds = normalized.MaxCooldownSeconds
+		}
+		if rule.MaxCooldownSeconds < rule.InitialCooldownSeconds {
+			rule.MaxCooldownSeconds = rule.InitialCooldownSeconds
+		}
+		if rule.MaxCooldownSeconds > maxProviderCredentialPolicyCooldownSeconds {
+			rule.MaxCooldownSeconds = maxProviderCredentialPolicyCooldownSeconds
+		}
+		if rule.BackoffFactor < 2 {
+			rule.BackoffFactor = normalized.BackoffFactor
+		}
+		if rule.BackoffFactor > 16 {
+			rule.BackoffFactor = 16
+		}
+		rules = append(rules, rule)
+	}
+	normalized.PenaltyRules = rules
+	if len(normalized.ScopeStatuses) == 0 && len(normalized.PenaltyRules) == 0 {
+		return nil
+	}
+
+	if normalized.ManualTestConcurrency <= 0 {
+		normalized.ManualTestConcurrency = 4
+	}
+	if normalized.ManualTestConcurrency > maxProviderCredentialManualTestConcurrency {
+		normalized.ManualTestConcurrency = maxProviderCredentialManualTestConcurrency
+	}
+	if normalized.ManualTestMaxModels <= 0 {
+		normalized.ManualTestMaxModels = 3
+	}
+	if normalized.ManualTestMaxModels > maxProviderCredentialManualTestModels {
+		normalized.ManualTestMaxModels = maxProviderCredentialManualTestModels
+	}
+	if normalized.ManualTestTimeoutSeconds <= 0 {
+		normalized.ManualTestTimeoutSeconds = 30
+	}
+	if normalized.ManualTestTimeoutSeconds > maxProviderCredentialManualTestTimeout {
+		normalized.ManualTestTimeoutSeconds = maxProviderCredentialManualTestTimeout
 	}
 
 	normalized.ProbeModel = strings.TrimSpace(normalized.ProbeModel)
@@ -240,6 +308,28 @@ func NormalizeOpenAICompatibilityCredentialPolicy(policy *OpenAICompatibilityCre
 		normalized.ProbeConcurrency = 64
 	}
 	return &normalized
+}
+
+func normalizeCredentialPolicyPatterns(values []string, validateRegex bool) []string {
+	out := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, configured := range values {
+		configured = strings.TrimSpace(configured)
+		if configured == "" {
+			continue
+		}
+		if validateRegex {
+			if _, errCompile := regexp.Compile(configured); errCompile != nil {
+				continue
+			}
+		}
+		if _, ok := seen[configured]; ok {
+			continue
+		}
+		seen[configured] = struct{}{}
+		out = append(out, configured)
+	}
+	return out
 }
 
 // SanitizeCodexKeys removes Codex API key entries missing a BaseURL.

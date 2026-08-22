@@ -110,6 +110,7 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 	if errWeight := ValidateAuthWeight(auth); errWeight != nil {
 		return nil, fmt.Errorf("update auth: %w", errWeight)
 	}
+	now := time.Now()
 	m.mu.Lock()
 	existing, ok := m.auths[auth.ID]
 	if !ok || existing == nil {
@@ -127,7 +128,25 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 		if len(auth.ModelStates) == 0 && len(existing.ModelStates) > 0 {
 			auth.ModelStates = existing.ModelStates
 		}
-		if credentialWideQuotaActive(existing, time.Now()) {
+		if hasProviderCredentialPolicyState(existing) && providerCredentialPolicyForAuthConfig(m.runtimeConfigSnapshot(), auth) != nil {
+			auth.Quota = existing.Quota
+			auth.LastError = cloneError(existing.LastError)
+			if credentialWideQuotaActive(existing, now) {
+				auth.Unavailable = existing.Unavailable
+				auth.NextRetryAfter = existing.NextRetryAfter
+				auth.StatusMessage = existing.StatusMessage
+				if auth.Status == StatusActive {
+					auth.Status = existing.Status
+				}
+			} else {
+				auth.Unavailable = false
+				auth.NextRetryAfter = time.Time{}
+				auth.StatusMessage = ""
+				if auth.Status == StatusError {
+					auth.Status = StatusActive
+				}
+			}
+		} else if credentialWideQuotaActive(existing, now) {
 			auth.Unavailable = existing.Unavailable
 			auth.NextRetryAfter = existing.NextRetryAfter
 			auth.Quota = existing.Quota
@@ -136,7 +155,6 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 			}
 		}
 	}
-	now := time.Now()
 	cooldownStateChanged := normalizeModelStates(auth)
 	if m.cooldownDisabledForAuth(auth) || auth.Disabled || auth.Status == StatusDisabled {
 		cooldownStateChanged = clearCooldownStateForAuth(auth, now) || cooldownStateChanged

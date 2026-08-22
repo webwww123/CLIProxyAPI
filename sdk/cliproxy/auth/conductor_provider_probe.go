@@ -25,7 +25,7 @@ type providerCredentialProbeCandidate struct {
 }
 
 func providerCredentialProbeEnabled(policy *internalconfig.OpenAICompatibilityCredentialPolicy) bool {
-	return policy != nil && strings.TrimSpace(policy.ProbeModel) != "" && len(policy.ScopeStatuses) > 0
+	return policy != nil && strings.TrimSpace(policy.ProbeModel) != "" && providerCredentialPolicyHasMatchers(policy)
 }
 
 func providerCredentialProbeInterval(policy *internalconfig.OpenAICompatibilityCredentialPolicy) time.Duration {
@@ -61,6 +61,11 @@ func cloneProviderCredentialPolicy(policy *internalconfig.OpenAICompatibilityCre
 	}
 	cloned := *policy
 	cloned.ScopeStatuses = append([]int(nil), policy.ScopeStatuses...)
+	cloned.PenaltyRules = append([]internalconfig.OpenAICompatibilityCredentialPolicyRule(nil), policy.PenaltyRules...)
+	for i := range cloned.PenaltyRules {
+		cloned.PenaltyRules[i].Match = append([]string(nil), policy.PenaltyRules[i].Match...)
+		cloned.PenaltyRules[i].MatchRegexr = append([]string(nil), policy.PenaltyRules[i].MatchRegexr...)
+	}
 	return cloned
 }
 
@@ -136,6 +141,7 @@ func (m *Manager) scheduleProviderCredentialProbes(ctx context.Context, now time
 			if providerCredentialProbeEnabled(currentPolicy) && !currentDeadline.IsZero() && !currentDeadline.After(now.Add(providerCredentialProbeInterval(currentPolicy))) {
 				current.Unavailable = true
 				current.Status = StatusError
+				current.StatusMessage = "credential policy cooldown"
 				current.NextRetryAfter = leaseDeadline
 				current.Quota.Exceeded = true
 				current.Quota.Reason = providerCredentialPolicyQuotaReason
@@ -304,6 +310,7 @@ func (m *Manager) extendProviderCredentialProbeLease(authID string, now time.Tim
 		if leaseDeadline.After(auth.NextRetryAfter) {
 			auth.Unavailable = true
 			auth.Status = StatusError
+			auth.StatusMessage = "credential policy cooldown"
 			auth.NextRetryAfter = leaseDeadline
 			auth.UpdatedAt = now
 			snapshot = auth.Clone()
@@ -343,6 +350,7 @@ func (m *Manager) finishProviderCredentialProbe(authID string, policy internalco
 	var snapshot *Auth
 	var cooldown time.Duration
 	var backoffLevel int
+	matchedRule := ""
 	policyDisabled := false
 	provider := ""
 	credentialRef := "unknown"
@@ -358,7 +366,7 @@ func (m *Manager) finishProviderCredentialProbe(authID string, policy internalco
 			policyDisabled = true
 			clearProviderCredentialPolicyState(auth, now)
 		} else if probeErr == nil {
-			clearProviderCredentialPolicyState(auth, now)
+			recoverProviderCredentialPolicyState(auth, now)
 		} else {
 			effectivePolicy = cloneProviderCredentialPolicy(currentPolicy)
 			// The probe lease only fences live traffic while the check is running.
@@ -366,7 +374,12 @@ func (m *Manager) finishProviderCredentialProbe(authID string, policy internalco
 			auth.NextRetryAfter = time.Time{}
 			auth.Quota.NextRecoverAt = time.Time{}
 			resultErr := resultErrorFromError(probeErr)
-			cooldown, backoffLevel, _ = applyProviderCredentialPolicyFailureState(auth, resultErr, &effectivePolicy, now)
+			penalty, matched := providerCredentialPolicyMatch(&effectivePolicy, probeErr)
+			if !matched {
+				penalty = baseProviderCredentialPenalty(&effectivePolicy)
+			}
+			matchedRule = penalty.rule
+			cooldown, backoffLevel, _ = applyProviderCredentialPolicyFailureState(auth, resultErr, &effectivePolicy, penalty, now)
 		}
 		snapshot = auth.Clone()
 	}
@@ -405,6 +418,9 @@ func (m *Manager) finishProviderCredentialProbe(authID string, policy internalco
 	cooldownText := cooldown.Round(time.Second).String()
 	fields["cooldown"] = cooldownText
 	fields["backoff_level"] = backoffLevel
+	if matchedRule != "" {
+		fields["penalty_rule"] = matchedRule
+	}
 	log.WithFields(fields).Warnf(
 		"provider credential probe failed: credential_ref=%s probe_model=%s status=%d cooldown=%s backoff_level=%d",
 		credentialRef,

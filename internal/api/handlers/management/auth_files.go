@@ -344,6 +344,9 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth) gin.H {
 	entry["success"] = auth.Success
 	entry["failed"] = auth.Failed
 	entry["recent_requests"] = auth.RecentRequestsSnapshot(time.Now())
+	if policyStatus, ok := coreauth.ProviderCredentialPolicyStatusForAuth(auth, time.Now()); ok {
+		entry["credential_policy"] = credentialPolicyStatusEntry(policyStatus)
+	}
 	if email := authEmail(auth); email != "" {
 		entry["email"] = email
 	}

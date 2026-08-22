@@ -620,11 +620,22 @@ nonstream-keepalive-interval: 0
 #     credential-policy: # optional auth-wide isolation and automatic recovery for credential failures
 #       scope-statuses: [401, 402] # matching responses immediately rotate to another key and cool the whole credential
 #       initial-cooldown-seconds: 60
-#       max-cooldown-seconds: 21600
-#       backoff-factor: 5 # repeated post-expiry failures increase cooldown up to the maximum
+#       max-cooldown-seconds: 864000 # hot-configurable cap; maximum accepted value is 10 days
+#       backoff-factor: 5 # repeated failures increase cooldown; a success returns the key immediately but retains the level to penalize flapping
+#       cooldown-jitter-percent: 10 # optional symmetric jitter to avoid synchronized re-entry
+#       penalty-rules: # optional first-match overrides for clearly different credential failures
+#         - name: subscription-exhausted
+#           status: 402
+#           match: ["Check your subscription"]
+#           initial-cooldown-seconds: 3600
+#           max-cooldown-seconds: 864000
+#           backoff-factor: 5
 #       probe-model: "mistral-small-latest" # optional: one-token chat probe near expiry; omit to re-admit without a probe
 #       probe-interval-seconds: 5 # schedule the probe this many seconds before expiry, but execute it at the recovery deadline
 #       probe-concurrency: 4
+#       manual-test-concurrency: 4 # management-triggered tests of cooling credentials
+#       manual-test-max-models: 3 # current non-image upstream models tried when no model is supplied
+#       manual-test-timeout-seconds: 30
 #     request-scoped-errors: # optional: custom rules to classify upstream errors by status and body patterns
 #       - status: 400
 #         match:

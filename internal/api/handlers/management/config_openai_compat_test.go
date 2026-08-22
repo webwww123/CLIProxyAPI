@@ -20,11 +20,23 @@ func TestGetOpenAICompatIncludesDisableCooling(t *testing.T) {
 	credentialPolicy := &config.OpenAICompatibilityCredentialPolicy{
 		ScopeStatuses:          []int{http.StatusUnauthorized, http.StatusPaymentRequired},
 		InitialCooldownSeconds: 60,
-		MaxCooldownSeconds:     21600,
+		MaxCooldownSeconds:     864000,
 		BackoffFactor:          5,
-		ProbeModel:             "mistral-small-latest",
-		ProbeIntervalSeconds:   5,
-		ProbeConcurrency:       4,
+		CooldownJitterPercent:  10,
+		PenaltyRules: []config.OpenAICompatibilityCredentialPolicyRule{{
+			Name:                   "subscription",
+			Status:                 http.StatusPaymentRequired,
+			Match:                  []string{"Check your subscription"},
+			InitialCooldownSeconds: 3600,
+			MaxCooldownSeconds:     864000,
+			BackoffFactor:          5,
+		}},
+		ProbeModel:               "mistral-small-latest",
+		ProbeIntervalSeconds:     5,
+		ProbeConcurrency:         4,
+		ManualTestConcurrency:    4,
+		ManualTestMaxModels:      3,
+		ManualTestTimeoutSeconds: 30,
 	}
 	h := NewHandlerWithoutConfigFilePath(&config.Config{
 		OpenAICompatibility: []config.OpenAICompatibility{
@@ -82,7 +94,7 @@ func TestGetOpenAICompatIncludesDisableCooling(t *testing.T) {
 	if body.OpenAICompatibility[0].MaxRetryCredentials == nil || *body.OpenAICompatibility[0].MaxRetryCredentials != 4 {
 		t.Fatalf("expected max-retry-credentials to be present and 4, got %#v", body.OpenAICompatibility[0].MaxRetryCredentials)
 	}
-	if policy := body.OpenAICompatibility[0].CredentialPolicy; policy == nil || len(policy.ScopeStatuses) != 2 || policy.BackoffFactor != 5 || policy.ProbeConcurrency != 4 {
+	if policy := body.OpenAICompatibility[0].CredentialPolicy; policy == nil || len(policy.ScopeStatuses) != 2 || policy.BackoffFactor != 5 || policy.ProbeConcurrency != 4 || policy.CooldownJitterPercent != 10 || len(policy.PenaltyRules) != 1 || policy.ManualTestTimeoutSeconds != 30 {
 		t.Fatalf("expected credential-policy to be present, got %#v", policy)
 	}
 }
@@ -105,9 +117,21 @@ func TestPatchOpenAICompatCredentialPolicy(t *testing.T) {
       "initial-cooldown-seconds": 60,
       "max-cooldown-seconds": 21600,
       "backoff-factor": 5,
+      "cooldown-jitter-percent": 10,
+      "penalty-rules": [{
+        "name": "subscription",
+        "status": 402,
+        "match": ["Check your subscription"],
+        "initial-cooldown-seconds": 3600,
+        "max-cooldown-seconds": 864000,
+        "backoff-factor": 5
+      }],
       "probe-model": " mistral-small-latest ",
       "probe-interval-seconds": 5,
-      "probe-concurrency": 4
+      "probe-concurrency": 4,
+      "manual-test-concurrency": 4,
+      "manual-test-max-models": 3,
+      "manual-test-timeout-seconds": 30
     }
   }
 }`))
@@ -125,7 +149,7 @@ func TestPatchOpenAICompatCredentialPolicy(t *testing.T) {
 	if policy == nil || len(policy.ScopeStatuses) != 2 || policy.ScopeStatuses[0] != 401 || policy.ScopeStatuses[1] != 402 {
 		t.Fatalf("credential-policy statuses = %#v", policy)
 	}
-	if policy.ProbeModel != "mistral-small-latest" || policy.BackoffFactor != 5 || policy.ProbeConcurrency != 4 {
+	if policy.ProbeModel != "mistral-small-latest" || policy.BackoffFactor != 5 || policy.ProbeConcurrency != 4 || policy.CooldownJitterPercent != 10 || len(policy.PenaltyRules) != 1 || policy.PenaltyRules[0].Name != "subscription" || policy.ManualTestConcurrency != 4 || policy.ManualTestMaxModels != 3 || policy.ManualTestTimeoutSeconds != 30 {
 		t.Fatalf("credential-policy = %#v", policy)
 	}
 }

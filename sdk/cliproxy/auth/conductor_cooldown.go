@@ -259,10 +259,18 @@ func (m *Manager) clearDisabledCooldownStates(cfg *internalconfig.Config) bool {
 		if auth == nil {
 			continue
 		}
-		if !quotaCooldownDisabledForAuthWithConfig(auth, cfg) && !auth.Disabled && auth.Status != StatusDisabled {
+		clearAll := quotaCooldownDisabledForAuthWithConfig(auth, cfg) || auth.Disabled || auth.Status == StatusDisabled
+		clearProviderPolicy := hasProviderCredentialPolicyState(auth) && providerCredentialPolicyForAuthConfig(cfg, auth) == nil
+		if !clearAll && !clearProviderPolicy {
 			continue
 		}
-		if clearCooldownStateForAuth(auth, now) {
+		changed := false
+		if clearAll {
+			changed = clearCooldownStateForAuth(auth, now)
+		} else if clearProviderPolicy {
+			changed = clearProviderCredentialPolicyState(auth, now)
+		}
+		if changed {
 			snapshots = append(snapshots, auth.Clone())
 		}
 	}
@@ -334,17 +342,75 @@ func (m *Manager) RestoreCooldownStates(ctx context.Context) error {
 
 func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now time.Time) bool {
 	authID := strings.TrimSpace(record.AuthID)
-	if authID == "" || record.NextRetryAfter.IsZero() {
+	model := strings.TrimSpace(record.Model)
+	providerPolicyRecord := model == "" && strings.EqualFold(strings.TrimSpace(record.Quota.Reason), providerCredentialPolicyQuotaReason)
+	deadline := record.NextRetryAfter
+	if record.Quota.NextRecoverAt.After(deadline) {
+		deadline = record.Quota.NextRecoverAt
+	}
+	if authID == "" || (deadline.IsZero() && !providerPolicyRecord) {
 		return false
 	}
+	record.NextRetryAfter = deadline
 	auth := m.auths[authID]
 	if auth == nil || auth.Disabled || auth.Status == StatusDisabled || m.cooldownDisabledForAuth(auth) {
 		return false
 	}
+	if providerPolicyRecord && (!record.Quota.Exceeded || deadline.IsZero()) {
+		if m.providerCredentialPolicyForAuth(auth) == nil {
+			return false
+		}
+		updatedAt := record.UpdatedAt
+		if updatedAt.IsZero() {
+			updatedAt = now
+		}
+		quota := record.Quota
+		quota.Exceeded = false
+		quota.Reason = providerCredentialPolicyQuotaReason
+		quota.NextRecoverAt = time.Time{}
+		auth.Unavailable = false
+		auth.StatusMessage = ""
+		auth.NextRetryAfter = time.Time{}
+		auth.Quota = quota
+		auth.LastError = nil
+		auth.UpdatedAt = updatedAt
+		updateAggregatedAvailability(auth, now)
+		if hasModelError(auth, now) {
+			auth.Status = StatusError
+		} else {
+			auth.Status = StatusActive
+		}
+		return true
+	}
 	if !record.NextRetryAfter.After(now) {
 		policy := m.providerCredentialPolicyForAuth(auth)
-		if strings.TrimSpace(record.Model) != "" || !strings.EqualFold(strings.TrimSpace(record.Quota.Reason), providerCredentialPolicyQuotaReason) || !providerCredentialProbeEnabled(policy) {
+		if strings.TrimSpace(record.Model) != "" || !strings.EqualFold(strings.TrimSpace(record.Quota.Reason), providerCredentialPolicyQuotaReason) || policy == nil {
 			return false
+		}
+		if !providerCredentialProbeEnabled(policy) {
+			updatedAt := record.UpdatedAt
+			if updatedAt.IsZero() {
+				updatedAt = now
+			}
+			quota := record.Quota
+			quota.Exceeded = true
+			quota.Reason = providerCredentialPolicyQuotaReason
+			if quota.NextRecoverAt.IsZero() {
+				quota.NextRecoverAt = record.NextRetryAfter
+			}
+			auth.Unavailable = false
+			auth.StatusMessage = ""
+			auth.NextRetryAfter = time.Time{}
+			auth.Quota = quota
+			auth.LastError = cloneError(record.LastError)
+			auth.UpdatedAt = updatedAt
+			updateAggregatedAvailability(auth, now)
+			if hasModelError(auth, now) {
+				auth.Status = StatusError
+			} else {
+				auth.Status = StatusActive
+			}
+			return true
 		}
 		expiredDeadline := record.NextRetryAfter
 		record.NextRetryAfter = now.Add(providerCredentialProbeLease(policy))
@@ -360,7 +426,6 @@ func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now ti
 		updatedAt = now
 	}
 	reason := strings.TrimSpace(record.Reason)
-	model := strings.TrimSpace(record.Model)
 	quota := record.Quota
 	if quota.Exceeded && quota.NextRecoverAt.IsZero() {
 		quota.NextRecoverAt = record.NextRetryAfter
@@ -398,7 +463,7 @@ func clearCooldownStateForAuth(auth *Auth, now time.Time) bool {
 		return false
 	}
 	changed := false
-	if auth.Unavailable || !auth.NextRetryAfter.IsZero() || auth.Quota.Exceeded || !auth.Quota.NextRecoverAt.IsZero() {
+	if auth.Unavailable || !auth.NextRetryAfter.IsZero() || auth.Quota.Exceeded || auth.Quota.Reason != "" || !auth.Quota.NextRecoverAt.IsZero() || auth.Quota.BackoffLevel != 0 {
 		auth.Unavailable = false
 		auth.NextRetryAfter = time.Time{}
 		auth.Quota = QuotaState{}
@@ -409,7 +474,7 @@ func clearCooldownStateForAuth(auth *Auth, now time.Time) bool {
 		if state == nil {
 			continue
 		}
-		if state.Unavailable || !state.NextRetryAfter.IsZero() || state.Quota.Exceeded || !state.Quota.NextRecoverAt.IsZero() {
+		if state.Unavailable || !state.NextRetryAfter.IsZero() || state.Quota.Exceeded || state.Quota.Reason != "" || !state.Quota.NextRecoverAt.IsZero() || state.Quota.BackoffLevel != 0 {
 			state.Unavailable = false
 			state.NextRetryAfter = time.Time{}
 			state.Quota = QuotaState{}
@@ -662,15 +727,28 @@ func cooldownErrorEqual(a, b *Error) bool {
 }
 
 func authCooldownStateRecord(auth *Auth, now time.Time) (CooldownStateRecord, bool) {
-	if auth == nil || !auth.Unavailable || auth.NextRetryAfter.IsZero() || !auth.NextRetryAfter.After(now) {
+	if auth == nil {
+		return CooldownStateRecord{}, false
+	}
+	deadline := credentialWideQuotaDeadline(auth)
+	status := "cooling"
+	if hasProviderCredentialPolicyState(auth) {
+		if !auth.Quota.Exceeded {
+			status = "healthy"
+		} else if deadline.IsZero() {
+			return CooldownStateRecord{}, false
+		} else if !deadline.After(now) {
+			status = "eligible"
+		}
+	} else if !auth.Unavailable || deadline.IsZero() || !deadline.After(now) {
 		return CooldownStateRecord{}, false
 	}
 	return CooldownStateRecord{
 		Provider:       strings.TrimSpace(auth.Provider),
 		AuthID:         auth.ID,
 		AuthFile:       cooldownAuthFile(auth),
-		Status:         "cooling",
-		NextRetryAfter: auth.NextRetryAfter,
+		Status:         status,
+		NextRetryAfter: deadline,
 		Reason:         cooldownReason(auth.StatusMessage, auth.Quota, auth.LastError),
 		Quota:          auth.Quota,
 		LastError:      cloneError(auth.LastError),
@@ -730,6 +808,8 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	var authSnapshot *Auth
 	cooldownStateChanged := false
 	var credentialPolicyLog *providerCredentialPolicyLogEntry
+	var credentialPolicyRecoveryLog *providerCredentialPolicyLogEntry
+	handledCredentialPolicy := false
 
 	m.mu.Lock()
 	if auth, ok := m.auths[result.AuthID]; ok && auth != nil {
@@ -740,6 +820,14 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			cooldownRecordsBefore = m.cooldownStateRecordsForAuthLocked(auth, now)
 		}
 		auth.recordRecentRequest(now, result.Success)
+		var retainedPolicyQuota *QuotaState
+		var retainedPolicyError *Error
+		if !result.Success && hasProviderCredentialPolicyState(auth) && !credentialWideQuotaActive(auth, now) {
+			quota := auth.Quota
+			retainedPolicyQuota = &quota
+			retainedPolicyError = cloneError(auth.LastError)
+		}
+
 		if result.Success {
 			auth.Success++
 		} else {
@@ -747,6 +835,18 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		}
 
 		if result.Success {
+			policyRecovered := false
+			if hasProviderCredentialPolicyState(auth) && auth.Quota.Exceeded && !credentialWideQuotaActive(auth, now) {
+				credentialPolicyRecoveryLog = &providerCredentialPolicyLogEntry{
+					provider:      auth.Provider,
+					credentialRef: stableCredentialRef(auth),
+					backoffLevel:  auth.Quota.BackoffLevel,
+				}
+				if auth.LastError != nil {
+					credentialPolicyRecoveryLog.status = auth.LastError.HTTPStatus
+				}
+				policyRecovered = recoverProviderCredentialPolicyState(auth, now)
+			}
 			if credentialWideQuotaActive(auth, now) {
 				// Retain active credential-scoped cooldown
 			} else if modelKey != "" {
@@ -761,26 +861,29 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				auth.UpdatedAt = now
 				shouldResumeModel = true
 				clearModelQuota = true
-			} else {
+			} else if hasProviderCredentialPolicyState(auth) {
+				recoverProviderCredentialPolicyState(auth, now)
+			} else if !policyRecovered {
 				clearAuthStateOnSuccess(auth, now)
 			}
 		} else {
-			handledCredentialPolicy := false
 			if result.CredentialScope && result.Error != nil && !shouldSkipCredentialCooldown(result.Error) {
 				policy := m.providerCredentialPolicyForAuth(auth)
 				status := statusCodeFromResult(result.Error)
-				if providerCredentialPolicyMatchesStatus(policy, status) {
+				penalty, matched := providerCredentialPolicyMatch(policy, result.Error)
+				if matched {
 					disableCooling := m.cooldownDisabledForAuth(auth)
 					if result.Error.Code == ErrorCodeForceCooldown {
 						disableCooling = false
 					}
 					if !disableCooling {
-						cooldown, backoffLevel, stateChanged := applyProviderCredentialPolicyFailureState(auth, result.Error, policy, now)
+						cooldown, backoffLevel, stateChanged := applyProviderCredentialPolicyFailureState(auth, result.Error, policy, penalty, now)
 						if stateChanged {
 							credentialPolicyLog = &providerCredentialPolicyLogEntry{
 								provider:      auth.Provider,
 								credentialRef: stableCredentialRef(auth),
 								status:        status,
+								rule:          penalty.rule,
 								cooldown:      cooldown,
 								backoffLevel:  backoffLevel,
 							}
@@ -946,6 +1049,10 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				applyAuthFailureState(auth, result.Error, result.RetryAfter, now, disableCooling)
 			}
 		}
+		if retainedPolicyQuota != nil && !handledCredentialPolicy {
+			auth.Quota = *retainedPolicyQuota
+			auth.LastError = retainedPolicyError
+		}
 
 		_ = m.persist(ctx, auth)
 		authSnapshot = auth.Clone()
@@ -957,18 +1064,35 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	m.mu.Unlock()
 	if credentialPolicyLog != nil {
 		cooldownText := credentialPolicyLog.cooldown.Round(time.Second).String()
-		logEntryWithRequestID(ctx).WithFields(log.Fields{
+		fields := log.Fields{
 			"provider":       credentialPolicyLog.provider,
 			"credential_ref": credentialPolicyLog.credentialRef,
 			"status":         credentialPolicyLog.status,
 			"cooldown":       cooldownText,
 			"backoff_level":  credentialPolicyLog.backoffLevel,
-		}).Warnf(
+		}
+		if credentialPolicyLog.rule != "" {
+			fields["penalty_rule"] = credentialPolicyLog.rule
+		}
+		logEntryWithRequestID(ctx).WithFields(fields).Warnf(
 			"provider credential policy cooldown applied: credential_ref=%s status=%d cooldown=%s backoff_level=%d",
 			credentialPolicyLog.credentialRef,
 			credentialPolicyLog.status,
 			cooldownText,
 			credentialPolicyLog.backoffLevel,
+		)
+	}
+	if credentialPolicyRecoveryLog != nil {
+		logEntryWithRequestID(ctx).WithFields(log.Fields{
+			"provider":       credentialPolicyRecoveryLog.provider,
+			"credential_ref": credentialPolicyRecoveryLog.credentialRef,
+			"last_status":    credentialPolicyRecoveryLog.status,
+			"backoff_level":  credentialPolicyRecoveryLog.backoffLevel,
+		}).Infof(
+			"provider credential policy cooldown cleared after successful real request: credential_ref=%s last_status=%d retained_backoff_level=%d",
+			credentialPolicyRecoveryLog.credentialRef,
+			credentialPolicyRecoveryLog.status,
+			credentialPolicyRecoveryLog.backoffLevel,
 		)
 	}
 	if m.scheduler != nil && authSnapshot != nil {
@@ -1190,8 +1314,14 @@ func updateAggregatedAvailability(auth *Auth, now time.Time) {
 		auth.Unavailable = true
 		return
 	}
+	retainedProviderPolicy := hasProviderCredentialPolicyState(auth)
+	retainedProviderQuota := auth.Quota
 	if len(auth.ModelStates) == 0 {
-		clearAggregatedAvailability(auth)
+		auth.Unavailable = false
+		auth.NextRetryAfter = time.Time{}
+		if !retainedProviderPolicy {
+			auth.Quota = QuotaState{}
+		}
 		return
 	}
 	allUnavailable := true
@@ -1243,6 +1373,10 @@ func updateAggregatedAvailability(auth *Auth, now time.Time) {
 		auth.NextRetryAfter = earliestRetry
 	} else {
 		auth.NextRetryAfter = time.Time{}
+	}
+	if retainedProviderPolicy {
+		auth.Quota = retainedProviderQuota
+		return
 	}
 	if quotaExceeded {
 		auth.Quota.Exceeded = true

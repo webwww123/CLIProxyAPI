@@ -15,15 +15,20 @@ import (
 )
 
 type providerCredentialPolicyExecutor struct {
-	provider      string
-	mu            sync.Mutex
-	calls         []string
-	failureStatus int
-	succeedOnCall int
-	probeErr      error
-	probeDone     chan struct{}
-	probeRelease  <-chan struct{}
-	probeOnce     sync.Once
+	provider       string
+	mu             sync.Mutex
+	calls          []string
+	models         []string
+	failureStatus  int
+	failureText    string
+	succeedOnCall  int
+	executeDone    chan struct{}
+	executeRelease <-chan struct{}
+	executeOnce    sync.Once
+	probeErr       error
+	probeDone      chan struct{}
+	probeRelease   <-chan struct{}
+	probeOnce      sync.Once
 }
 
 func (e *providerCredentialPolicyExecutor) Identifier() string { return e.provider }
@@ -52,6 +57,17 @@ func (e *providerCredentialPolicyExecutor) Execute(_ context.Context, auth *Auth
 		}
 		return cliproxyexecutor.Response{Payload: []byte(`{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`)}, nil
 	}
+	e.executeOnce.Do(func() {
+		if e.executeDone != nil {
+			close(e.executeDone)
+		}
+	})
+	if e.executeRelease != nil {
+		<-e.executeRelease
+	}
+	e.mu.Lock()
+	e.models = append(e.models, req.Model)
+	e.mu.Unlock()
 	callCount, succeedOnCall, failureStatus := e.recordAttempt(auth)
 	if succeedOnCall > 0 && callCount == succeedOnCall {
 		return cliproxyexecutor.Response{Payload: []byte(`{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`)}, nil
@@ -59,7 +75,11 @@ func (e *providerCredentialPolicyExecutor) Execute(_ context.Context, auth *Auth
 	if failureStatus == 0 {
 		failureStatus = http.StatusPaymentRequired
 	}
-	return cliproxyexecutor.Response{}, &Error{HTTPStatus: failureStatus, Message: "credential rejected"}
+	failureText := e.failureText
+	if failureText == "" {
+		failureText = "credential rejected"
+	}
+	return cliproxyexecutor.Response{}, &Error{HTTPStatus: failureStatus, Message: failureText}
 }
 
 func (e *providerCredentialPolicyExecutor) ExecuteStream(_ context.Context, auth *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
@@ -92,6 +112,12 @@ func (e *providerCredentialPolicyExecutor) Calls() []string {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return append([]string(nil), e.calls...)
+}
+
+func (e *providerCredentialPolicyExecutor) Models() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]string(nil), e.models...)
 }
 
 func newProviderCredentialPolicyManager(t *testing.T, maxRetryCredentials int, policy *internalconfig.OpenAICompatibilityCredentialPolicy, executor *providerCredentialPolicyExecutor, authCount int) (*Manager, []string) {
@@ -602,5 +628,347 @@ func TestProviderCredentialProbePolicyRemovalClearsStaleResult(t *testing.T) {
 			t.Fatalf("removed policy retained stale probe penalty: %+v", updated)
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestProviderCredentialPolicyRuleOverrideAndDeterministicJitter(t *testing.T) {
+	policy := &internalconfig.OpenAICompatibilityCredentialPolicy{
+		ScopeStatuses:          []int{http.StatusUnauthorized},
+		InitialCooldownSeconds: 60,
+		MaxCooldownSeconds:     600,
+		BackoffFactor:          2,
+		CooldownJitterPercent:  10,
+		PenaltyRules: []internalconfig.OpenAICompatibilityCredentialPolicyRule{{
+			Name:                   "subscription-exhausted",
+			Status:                 http.StatusPaymentRequired,
+			Match:                  []string{"check your subscription"},
+			InitialCooldownSeconds: 3600,
+			MaxCooldownSeconds:     10 * 24 * 60 * 60,
+			BackoffFactor:          5,
+		}},
+	}
+	penalty, matched := providerCredentialPolicyMatch(policy, &Error{HTTPStatus: http.StatusPaymentRequired, Message: "CHECK YOUR SUBSCRIPTION before retrying"})
+	if !matched || penalty.rule != "subscription-exhausted" || penalty.initialCooldownSeconds != 3600 || penalty.backoffFactor != 5 {
+		t.Fatalf("matched penalty = %+v, matched=%t", penalty, matched)
+	}
+	now := time.Unix(1_700_000_000, 0)
+	nextA, levelA := providerCredentialPenaltyCooldown(penalty, QuotaState{}, now, "auth-a")
+	nextARepeat, levelARepeat := providerCredentialPenaltyCooldown(penalty, QuotaState{}, now, "auth-a")
+	if !nextA.Equal(nextARepeat) || levelA != levelARepeat {
+		t.Fatalf("jitter is not deterministic: (%v,%d) vs (%v,%d)", nextA, levelA, nextARepeat, levelARepeat)
+	}
+	if got := nextA.Sub(now); got < 54*time.Minute || got > 66*time.Minute {
+		t.Fatalf("jittered first cooldown = %v, want within +/-10%%", got)
+	}
+	nextB, _ := providerCredentialPenaltyCooldown(penalty, QuotaState{}, now, "auth-b")
+	if nextA.Equal(nextB) {
+		t.Fatalf("different credentials received identical deterministic jitter: %v", nextA)
+	}
+	maxNext, maxLevel := providerCredentialPenaltyCooldown(penalty, QuotaState{BackoffLevel: 20}, now, "auth-a")
+	if got := maxNext.Sub(now); got > 10*24*time.Hour || got < 5*24*time.Hour {
+		t.Fatalf("max jittered cooldown = %v, want <=10d and >=5d", got)
+	}
+	if maxLevel != 20 {
+		t.Fatalf("max backoff level advanced: got %d want 20", maxLevel)
+	}
+}
+
+func TestProviderCredentialPolicyRealSuccessClearsOnlyExpiredPenalty(t *testing.T) {
+	policy := &internalconfig.OpenAICompatibilityCredentialPolicy{
+		ScopeStatuses:          []int{http.StatusPaymentRequired},
+		InitialCooldownSeconds: 1,
+		MaxCooldownSeconds:     30,
+		BackoffFactor:          2,
+	}
+	m, ids := newProviderCredentialPolicyManager(t, 1, policy, &providerCredentialPolicyExecutor{}, 1)
+	now := time.Now()
+	m.mu.Lock()
+	auth := m.auths[ids[0]]
+	auth.Unavailable = true
+	auth.Status = StatusError
+	auth.NextRetryAfter = now.Add(time.Minute)
+	auth.Quota = QuotaState{Exceeded: true, Reason: providerCredentialPolicyQuotaReason, NextRecoverAt: auth.NextRetryAfter, BackoffLevel: 3}
+	auth.LastError = &Error{HTTPStatus: http.StatusPaymentRequired, Message: "provider credential policy failure"}
+	auth.UpdatedAt = now
+	m.mu.Unlock()
+
+	m.MarkResult(context.Background(), Result{AuthID: ids[0], Model: "test-model", Success: true})
+	active, _ := m.GetByID(ids[0])
+	if active == nil || !active.Quota.Exceeded || active.Quota.BackoffLevel != 3 {
+		t.Fatalf("active cooldown was cleared by stale success: %+v", active)
+	}
+
+	m.mu.Lock()
+	auth = m.auths[ids[0]]
+	auth.NextRetryAfter = now.Add(-time.Second)
+	auth.Quota.NextRecoverAt = auth.NextRetryAfter
+	m.mu.Unlock()
+	m.MarkResult(context.Background(), Result{AuthID: ids[0], Model: "test-model", Success: true})
+	recovered, _ := m.GetByID(ids[0])
+	if recovered == nil || recovered.Quota.Exceeded || recovered.Quota.Reason != providerCredentialPolicyQuotaReason || recovered.Quota.BackoffLevel != 3 || recovered.Unavailable {
+		t.Fatalf("expired penalty was not cleared by real success: %+v", recovered)
+	}
+	healthyRecords := m.cooldownStateRecordsSnapshot()
+	if len(healthyRecords) != 1 || healthyRecords[0].Status != "healthy" || healthyRecords[0].Quota.BackoffLevel != 3 || !healthyRecords[0].NextRetryAfter.IsZero() {
+		t.Fatalf("healthy retained history snapshot = %+v", healthyRecords)
+	}
+	m.MarkResult(context.Background(), Result{
+		AuthID:          ids[0],
+		Model:           "test-model",
+		Success:         false,
+		CredentialScope: true,
+		Error:           &Error{HTTPStatus: http.StatusPaymentRequired, Message: "flapping again"},
+	})
+	repenalized, _ := m.GetByID(ids[0])
+	if repenalized == nil || !repenalized.Quota.Exceeded || repenalized.Quota.BackoffLevel != 4 {
+		t.Fatalf("post-success failure did not continue retained ladder: %+v", repenalized)
+	}
+}
+
+func TestProviderCredentialPolicyExpiredHistoryPersistsRestoresEligibleAndEscalates(t *testing.T) {
+	policy := &internalconfig.OpenAICompatibilityCredentialPolicy{
+		ScopeStatuses:          []int{http.StatusPaymentRequired},
+		InitialCooldownSeconds: 1,
+		MaxCooldownSeconds:     30,
+		BackoffFactor:          2,
+	}
+	m, ids := newProviderCredentialPolicyManager(t, 1, policy, &providerCredentialPolicyExecutor{}, 1)
+	expired := time.Now().Add(-time.Minute)
+	m.mu.Lock()
+	auth := m.auths[ids[0]]
+	auth.Unavailable = true
+	auth.Status = StatusError
+	auth.NextRetryAfter = expired
+	auth.Quota = QuotaState{Exceeded: true, Reason: providerCredentialPolicyQuotaReason, NextRecoverAt: expired, BackoffLevel: 2}
+	auth.LastError = &Error{HTTPStatus: http.StatusPaymentRequired, Message: "provider credential policy failure"}
+	auth.UpdatedAt = expired
+	m.mu.Unlock()
+	records := m.cooldownStateRecordsSnapshot()
+	if len(records) != 1 || records[0].Status != "eligible" || records[0].Quota.BackoffLevel != 2 {
+		t.Fatalf("expired history snapshot = %+v", records)
+	}
+
+	restoreStore := &recordingCooldownStateStore{load: cloneCooldownStateRecords(records)}
+	restoredManager, restoredIDs := newProviderCredentialPolicyManager(t, 1, policy, &providerCredentialPolicyExecutor{}, 1)
+	restoredManager.SetCooldownStateStore(restoreStore)
+	if errRestore := restoredManager.RestoreCooldownStates(context.Background()); errRestore != nil {
+		t.Fatalf("RestoreCooldownStates() error = %v", errRestore)
+	}
+	restored, _ := restoredManager.GetByID(restoredIDs[0])
+	if restored == nil || restored.Unavailable || !restored.Quota.Exceeded || restored.Quota.BackoffLevel != 2 {
+		t.Fatalf("restored expired history = %+v", restored)
+	}
+	if blocked, _, _ := isAuthBlockedForModel(restored, "test-model", time.Now()); blocked {
+		t.Fatalf("restored expired credential was not immediately eligible: %+v", restored)
+	}
+	restoredManager.MarkResult(context.Background(), Result{
+		AuthID:          restoredIDs[0],
+		Model:           "test-model",
+		Success:         false,
+		CredentialScope: true,
+		Error:           &Error{HTTPStatus: http.StatusPaymentRequired, Message: "still exhausted"},
+	})
+	escalated, _ := restoredManager.GetByID(restoredIDs[0])
+	if escalated == nil || !escalated.Unavailable || escalated.Quota.BackoffLevel != 3 || !escalated.NextRetryAfter.After(time.Now()) {
+		t.Fatalf("restored penalty did not escalate: %+v", escalated)
+	}
+}
+
+func TestProviderCredentialPolicyExpiredHistorySurvivesUnrelatedFailure(t *testing.T) {
+	policy := &internalconfig.OpenAICompatibilityCredentialPolicy{
+		ScopeStatuses:          []int{http.StatusPaymentRequired},
+		InitialCooldownSeconds: 1,
+		MaxCooldownSeconds:     30,
+		BackoffFactor:          2,
+	}
+	m, ids := newProviderCredentialPolicyManager(t, 1, policy, &providerCredentialPolicyExecutor{}, 1)
+	expired := time.Now().Add(-time.Minute)
+	setProviderCredentialPolicyTestState(m, ids[0], expired, 2)
+	m.MarkResult(context.Background(), Result{
+		AuthID:  ids[0],
+		Model:   "test-model",
+		Success: false,
+		Error:   &Error{HTTPStatus: http.StatusBadGateway, Message: "temporary model path failure"},
+	})
+	updated, _ := m.GetByID(ids[0])
+	if updated == nil || !updated.Quota.Exceeded || updated.Quota.Reason != providerCredentialPolicyQuotaReason || updated.Quota.BackoffLevel != 2 {
+		t.Fatalf("unrelated failure erased penalty history: %+v", updated)
+	}
+	if credentialWideQuotaActive(updated, time.Now()) {
+		t.Fatalf("unrelated model cooldown became an auth-wide policy cooldown: %+v", updated)
+	}
+	status, ok := ProviderCredentialPolicyStatusForAuth(updated, time.Now())
+	if !ok || status.State != "eligible" || status.LastHTTPStatus != http.StatusPaymentRequired {
+		t.Fatalf("retained policy status = %+v, ok=%t", status, ok)
+	}
+	if blocked, _, _ := isAuthBlockedForModel(updated, "sibling-model", time.Now()); blocked {
+		t.Fatalf("unrelated model failure blocked sibling models via retained history: %+v", updated)
+	}
+	records := m.cooldownStateRecordsSnapshot()
+	if len(records) == 0 || records[0].Status != "eligible" || records[0].Quota.BackoffLevel != 2 {
+		t.Fatalf("retained history persistence = %+v", records)
+	}
+}
+
+func TestProviderCredentialPolicyHealthyHistoryRestoresAcrossRestart(t *testing.T) {
+	policy := &internalconfig.OpenAICompatibilityCredentialPolicy{
+		ScopeStatuses:          []int{http.StatusPaymentRequired},
+		InitialCooldownSeconds: 1,
+		MaxCooldownSeconds:     30,
+		BackoffFactor:          2,
+	}
+	m, ids := newProviderCredentialPolicyManager(t, 1, policy, &providerCredentialPolicyExecutor{}, 1)
+	setProviderCredentialPolicyTestState(m, ids[0], time.Now().Add(-time.Minute), 2)
+	m.MarkResult(context.Background(), Result{AuthID: ids[0], Model: "test-model", Success: true})
+	records := m.cooldownStateRecordsSnapshot()
+	if len(records) != 1 || records[0].Status != "healthy" || records[0].Quota.Exceeded || records[0].Quota.BackoffLevel != 2 {
+		t.Fatalf("healthy persisted records = %+v", records)
+	}
+
+	restoredManager, restoredIDs := newProviderCredentialPolicyManager(t, 1, policy, &providerCredentialPolicyExecutor{}, 1)
+	restoredManager.SetCooldownStateStore(&recordingCooldownStateStore{load: cloneCooldownStateRecords(records)})
+	if errRestore := restoredManager.RestoreCooldownStates(context.Background()); errRestore != nil {
+		t.Fatalf("RestoreCooldownStates() error = %v", errRestore)
+	}
+	restored, _ := restoredManager.GetByID(restoredIDs[0])
+	if restored == nil || restored.Quota.Exceeded || restored.Quota.Reason != providerCredentialPolicyQuotaReason || restored.Quota.BackoffLevel != 2 || restored.Unavailable {
+		t.Fatalf("restored healthy history = %+v", restored)
+	}
+	status, ok := ProviderCredentialPolicyStatusForAuth(restored, time.Now())
+	if !ok || status.State != "healthy" {
+		t.Fatalf("restored healthy status = %+v, ok=%t", status, ok)
+	}
+	reset, _, errReset := restoredManager.ResetQuota(context.Background(), restoredIDs[0])
+	if errReset != nil || reset == nil || reset.Quota.Reason != "" || reset.Quota.BackoffLevel != 0 {
+		t.Fatalf("ResetQuota() did not fully clear healthy history: reset=%+v err=%v", reset, errReset)
+	}
+}
+
+func TestProviderCredentialPolicyManualTestSuccessFailureAndFence(t *testing.T) {
+	policy := &internalconfig.OpenAICompatibilityCredentialPolicy{
+		ScopeStatuses:            []int{http.StatusUnauthorized, http.StatusPaymentRequired},
+		InitialCooldownSeconds:   60,
+		MaxCooldownSeconds:       3600,
+		BackoffFactor:            2,
+		ManualTestConcurrency:    2,
+		ManualTestMaxModels:      3,
+		ManualTestTimeoutSeconds: 5,
+	}
+
+	t.Run("success clears penalty", func(t *testing.T) {
+		executor := &providerCredentialPolicyExecutor{succeedOnCall: 1}
+		m, ids := newProviderCredentialPolicyManager(t, 1, policy, executor, 1)
+		setProviderCredentialPolicyTestState(m, ids[0], time.Now().Add(time.Minute), 2)
+		results, errTest := m.TestCoolingProviderCredentials(context.Background(), ProviderCredentialManualTestOptions{Provider: "mistral", AuthIDs: ids, Model: "test-model"})
+		if errTest != nil || len(results) != 1 || !results[0].Success || !results[0].Recovered || results[0].State != "active" {
+			t.Fatalf("manual success results = %+v, err=%v", results, errTest)
+		}
+		updated, _ := m.GetByID(ids[0])
+		if updated == nil || updated.Quota.Exceeded || updated.Quota.Reason != providerCredentialPolicyQuotaReason || updated.Quota.BackoffLevel != 2 || updated.Unavailable {
+			t.Fatalf("manual success did not clear penalty: %+v", updated)
+		}
+		if models := executor.Models(); len(models) != 1 || models[0] != "upstream-model" {
+			t.Fatalf("manual test models = %v, want configured upstream model", models)
+		}
+	})
+
+	t.Run("failure leaves penalty unchanged", func(t *testing.T) {
+		executor := &providerCredentialPolicyExecutor{failureStatus: http.StatusPaymentRequired}
+		m, ids := newProviderCredentialPolicyManager(t, 1, policy, executor, 1)
+		deadline := time.Now().Add(time.Minute)
+		setProviderCredentialPolicyTestState(m, ids[0], deadline, 2)
+		results, errTest := m.TestCoolingProviderCredentials(context.Background(), ProviderCredentialManualTestOptions{Provider: "mistral", AuthIDs: ids})
+		if errTest != nil || len(results) != 1 || results[0].Success || results[0].Recovered || results[0].ErrorCode != "credential_rejected" {
+			t.Fatalf("manual failure results = %+v, err=%v", results, errTest)
+		}
+		updated, _ := m.GetByID(ids[0])
+		if updated == nil || !credentialWideQuotaDeadline(updated).Equal(deadline) || updated.Quota.BackoffLevel != 2 {
+			t.Fatalf("manual failure changed penalty: %+v", updated)
+		}
+	})
+
+	t.Run("stale success cannot erase newer failure", func(t *testing.T) {
+		release := make(chan struct{})
+		executor := &providerCredentialPolicyExecutor{succeedOnCall: 1, executeDone: make(chan struct{}), executeRelease: release}
+		m, ids := newProviderCredentialPolicyManager(t, 1, policy, executor, 1)
+		setProviderCredentialPolicyTestState(m, ids[0], time.Now().Add(time.Minute), 2)
+		resultCh := make(chan []ProviderCredentialManualTestResult, 1)
+		go func() {
+			results, _ := m.TestCoolingProviderCredentials(context.Background(), ProviderCredentialManualTestOptions{Provider: "mistral", AuthIDs: ids})
+			resultCh <- results
+		}()
+		select {
+		case <-executor.executeDone:
+		case <-time.After(time.Second):
+			t.Fatal("manual credential test did not start")
+		}
+		newDeadline := time.Now().Add(2 * time.Hour)
+		m.mu.Lock()
+		auth := m.auths[ids[0]]
+		auth.NextRetryAfter = newDeadline
+		auth.Quota.NextRecoverAt = newDeadline
+		auth.Quota.BackoffLevel = 3
+		auth.UpdatedAt = time.Now().Add(time.Second)
+		m.mu.Unlock()
+		close(release)
+		results := <-resultCh
+		if len(results) != 1 || !results[0].Success || results[0].Recovered || results[0].State != "stale" {
+			t.Fatalf("stale manual success results = %+v", results)
+		}
+		updated, _ := m.GetByID(ids[0])
+		if updated == nil || updated.Quota.BackoffLevel != 3 || !credentialWideQuotaDeadline(updated).Equal(newDeadline) {
+			t.Fatalf("stale manual success erased newer failure: %+v", updated)
+		}
+	})
+}
+
+func TestProviderCredentialPolicyRemovalClearsExpiredHistory(t *testing.T) {
+	policy := &internalconfig.OpenAICompatibilityCredentialPolicy{
+		ScopeStatuses:          []int{http.StatusPaymentRequired},
+		InitialCooldownSeconds: 1,
+		MaxCooldownSeconds:     30,
+		BackoffFactor:          2,
+	}
+	m, ids := newProviderCredentialPolicyManager(t, 1, policy, &providerCredentialPolicyExecutor{}, 1)
+	setProviderCredentialPolicyTestState(m, ids[0], time.Now().Add(-time.Minute), 2)
+	cfg := m.runtimeConfigSnapshot().CloneForRuntime()
+	cfg.OpenAICompatibility[0].CredentialPolicy = nil
+	m.SetConfig(cfg)
+	updated, _ := m.GetByID(ids[0])
+	if updated == nil || updated.Quota.Exceeded || updated.Quota.BackoffLevel != 0 || updated.Unavailable {
+		t.Fatalf("removed policy retained expired history: %+v", updated)
+	}
+}
+
+func TestProviderCredentialManualTestModelsExcludeImagesAndResolveAlias(t *testing.T) {
+	entry := &internalconfig.OpenAICompatibility{Models: []internalconfig.OpenAICompatibilityModel{
+		{Name: "image-model", Alias: "image", Image: true},
+		{Name: "chat-a", Alias: "alias-a"},
+		{Name: "chat-b", Alias: "alias-b"},
+	}}
+	if got := providerCredentialManualTestModels(entry, "alias-b", 3); len(got) != 1 || got[0] != "chat-b" {
+		t.Fatalf("alias model resolution = %v", got)
+	}
+	if got := providerCredentialManualTestModels(entry, "image", 3); len(got) != 0 {
+		t.Fatalf("image model was selected for chat probe: %v", got)
+	}
+	if got := providerCredentialManualTestModels(entry, "", 1); len(got) != 1 || got[0] != "chat-a" {
+		t.Fatalf("default model selection = %v", got)
+	}
+}
+
+func setProviderCredentialPolicyTestState(m *Manager, authID string, deadline time.Time, backoffLevel int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	auth := m.auths[authID]
+	auth.Unavailable = deadline.After(time.Now())
+	auth.Status = StatusError
+	auth.StatusMessage = "credential policy cooldown"
+	auth.NextRetryAfter = deadline
+	auth.Quota = QuotaState{Exceeded: true, Reason: providerCredentialPolicyQuotaReason, NextRecoverAt: deadline, BackoffLevel: backoffLevel}
+	auth.LastError = &Error{HTTPStatus: http.StatusPaymentRequired, Message: "provider credential policy failure"}
+	auth.UpdatedAt = time.Now()
+	if m.scheduler != nil {
+		m.scheduler.upsertAuth(auth.Clone())
 	}
 }
