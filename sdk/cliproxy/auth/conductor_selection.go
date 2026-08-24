@@ -1101,6 +1101,36 @@ func (m *Manager) List() []*Auth {
 	return list
 }
 
+// AuthIndexByIDSnapshot returns a lightweight snapshot of stable auth indexes keyed by auth ID.
+func (m *Manager) AuthIndexByIDSnapshot() map[string]string {
+	out := map[string]string{}
+	if m == nil {
+		return out
+	}
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out = make(map[string]string, len(m.auths))
+	for _, auth := range m.auths {
+		if auth == nil {
+			continue
+		}
+		id := strings.TrimSpace(auth.ID)
+		if id == "" {
+			continue
+		}
+		index := strings.TrimSpace(auth.Index)
+		if index == "" {
+			index = stableAuthIndex(auth.indexSeed())
+		}
+		if index == "" {
+			continue
+		}
+		out[id] = index
+	}
+	return out
+}
+
 // GetByID retrieves an auth entry by its ID.
 func (m *Manager) GetByID(id string) (*Auth, bool) {
 	if id == "" {
