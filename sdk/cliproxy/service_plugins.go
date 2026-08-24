@@ -39,6 +39,12 @@ type executorRegistrationOptions struct {
 	includePlugins    bool
 	forceReplaceAuths bool
 	auths             []*coreauth.Auth
+	authSnapshots     []coreauth.ExecutorRegistrationAuthSnapshot
+}
+
+type pluginModelRuntimeStats struct {
+	executorRegistration executorRegistrationStats
+	modelAuthCount       int
 }
 
 var registerPluginExecutors = func(host *pluginhost.Host, manager *coreauth.Manager) {
@@ -126,41 +132,45 @@ func (s *Service) syncPluginRuntimeConfigForConfig(ctx context.Context, cfg *con
 	return ctx.Err() == nil
 }
 
-func (s *Service) syncPluginModelRuntime(ctx context.Context) {
+func (s *Service) syncPluginModelRuntime(ctx context.Context) pluginModelRuntimeStats {
+	var stats pluginModelRuntimeStats
 	if s == nil || s.pluginHost == nil || s.coreManager == nil {
-		return
+		return stats
 	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	s.pluginHost.RegisterModels(ctx, registry.GetGlobalRegistry())
 	if ctx.Err() != nil {
-		return
+		return stats
 	}
 	s.cfgMu.RLock()
 	homeEnabled := s.cfg != nil && s.cfg.Home.Enabled
 	s.cfgMu.RUnlock()
-	s.registerAvailableExecutors(ctx, executorRegistrationOptions{
+	stats.executorRegistration = s.registerAvailableExecutors(ctx, executorRegistrationOptions{
 		includeBaseline:   homeEnabled,
 		includePlugins:    true,
 		forceReplaceAuths: false,
-		auths:             s.coreManager.List(),
+		authSnapshots:     s.coreManager.ExecutorRegistrationSnapshot(),
 	})
-	s.refreshPluginModelRegistrations(ctx)
+	stats.modelAuthCount = s.refreshPluginModelRegistrations(ctx)
 	if ctx.Err() != nil {
-		return
+		return stats
 	}
 	s.coreManager.RefreshSchedulerAll()
+	return stats
 }
 
-func (s *Service) refreshPluginModelRegistrations(ctx context.Context) {
+func (s *Service) refreshPluginModelRegistrations(ctx context.Context) int {
 	if s == nil || s.pluginHost == nil || s.coreManager == nil {
-		return
+		return 0
 	}
-	s.registerModelsForAuthBatch(ctx, s.coreManager.List())
+	auths := s.coreManager.ModelRegistrationSnapshot()
+	s.registerModelSnapshotsForAuthBatch(ctx, auths)
+	return len(auths)
 }
 
-func (s *Service) registerModelsForAuthBatch(ctx context.Context, auths []*coreauth.Auth) {
+func (s *Service) registerModelSnapshotsForAuthBatch(ctx context.Context, auths []*coreauth.Auth) {
 	if s == nil || s.coreManager == nil || len(auths) == 0 {
 		return
 	}
@@ -169,7 +179,7 @@ func (s *Service) registerModelsForAuthBatch(ctx context.Context, auths []*corea
 		if auth == nil {
 			continue
 		}
-		authForRegistration := auth.Clone()
+		authForRegistration := auth
 		tasks = append(tasks, modelRegistrationTask{
 			phase:    modelRegistrationPhase(authForRegistration),
 			category: modelRegistrationCategory(authForRegistration),

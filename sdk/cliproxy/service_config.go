@@ -126,6 +126,7 @@ func (s *Service) applyConfigRuntime(ctx context.Context, commit configCommit, s
 	if s == nil || cfg == nil {
 		return false
 	}
+	reloadStarted := time.Now()
 	s.configRuntimeMu.Lock()
 	defer s.configRuntimeMu.Unlock()
 	if !s.configCommitCurrent(commit) {
@@ -162,14 +163,14 @@ func (s *Service) applyConfigRuntime(ctx context.Context, commit configCommit, s
 	if errContext := ctx.Err(); errContext != nil {
 		return false
 	}
-	var auths []*coreauth.Auth
+	var authSnapshots []coreauth.ExecutorRegistrationAuthSnapshot
 	if s.coreManager != nil {
-		auths = s.coreManager.List()
+		authSnapshots = s.coreManager.ExecutorRegistrationSnapshot()
 	}
-	s.registerAvailableExecutors(registrationCtx, executorRegistrationOptions{
+	executorStats := s.registerAvailableExecutors(registrationCtx, executorRegistrationOptions{
 		includeBaseline:   cfg.Home.Enabled,
 		forceReplaceAuths: true,
-		auths:             auths,
+		authSnapshots:     authSnapshots,
 	})
 	if errContext := ctx.Err(); errContext != nil {
 		return false
@@ -188,8 +189,25 @@ func (s *Service) applyConfigRuntime(ctx context.Context, commit configCommit, s
 	if errContext := ctx.Err(); errContext != nil {
 		return false
 	}
-	s.syncPluginModelRuntime(registrationCtx)
-	return ctx.Err() == nil
+	pluginStats := s.syncPluginModelRuntime(registrationCtx)
+	if errContext := ctx.Err(); errContext != nil {
+		return false
+	}
+	log.WithFields(log.Fields{
+		"config_sequence":                       commit.sequence,
+		"synthesize_config_auths":               synthesizeConfigAuths,
+		"auth_count":                            pluginStats.modelAuthCount,
+		"provider_count":                        pluginStats.executorRegistration.providerCount,
+		"executor_auth_count":                   executorStats.authCount,
+		"executor_registration_candidate_count": executorStats.registrationCount,
+		"executor_deduplicated_auth_count":      executorStats.duplicateCount,
+		"executor_disabled_auth_count":          executorStats.disabledCount,
+		"post_sync_executor_candidate_count":    pluginStats.executorRegistration.registrationCount,
+		"post_sync_deduplicated_auth_count":     pluginStats.executorRegistration.duplicateCount,
+		"post_sync_disabled_auth_count":         pluginStats.executorRegistration.disabledCount,
+		"config_runtime_reload_duration_millis": time.Since(reloadStarted).Milliseconds(),
+	}).Info("config runtime reload completed")
+	return true
 }
 
 func (s *Service) applyManagerConfig(ctx context.Context, commit configCommit) bool {

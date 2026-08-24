@@ -28,6 +28,23 @@ type openAICompatibilityRegistrationEntry struct {
 	models      []*ModelInfo
 }
 
+type executorRegistrationStats struct {
+	authCount         int
+	providerCount     int
+	registrationCount int
+	duplicateCount    int
+	disabledCount     int
+}
+
+type executorRegistrationSnapshotKey struct {
+	provider          string
+	label             string
+	baseURL           string
+	compatibilityName string
+	providerKey       string
+	authID            string
+}
+
 func (s *Service) newOpenAICompatibilityRegistrationCache() *openAICompatibilityRegistrationCache {
 	if s == nil {
 		return nil
@@ -173,9 +190,10 @@ func (s *Service) ensureExecutorsForAuthWithContext(ctx context.Context, a *core
 	})
 }
 
-func (s *Service) registerAvailableExecutors(ctx context.Context, opts executorRegistrationOptions) {
+func (s *Service) registerAvailableExecutors(ctx context.Context, opts executorRegistrationOptions) executorRegistrationStats {
+	var stats executorRegistrationStats
 	if s == nil || s.coreManager == nil {
-		return
+		return stats
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -183,7 +201,7 @@ func (s *Service) registerAvailableExecutors(ctx context.Context, opts executorR
 	s.executorRegistrationMu.Lock()
 	defer s.executorRegistrationMu.Unlock()
 	if ctx.Err() != nil {
-		return
+		return stats
 	}
 	// Keep all Service-owned executor registration paths here so native, Home,
 	// auth-derived, and plugin executors stay in the same binding order.
@@ -193,9 +211,13 @@ func (s *Service) registerAvailableExecutors(ctx context.Context, opts executorR
 	if len(opts.auths) > 0 {
 		s.registerExecutorsForAuths(opts.auths, opts.forceReplaceAuths)
 	}
+	if len(opts.authSnapshots) > 0 {
+		stats = s.registerExecutorsForAuthSnapshots(opts.authSnapshots, opts.forceReplaceAuths)
+	}
 	if opts.includePlugins && s.pluginHost != nil {
 		registerPluginExecutors(s.pluginHost, s.coreManager)
 	}
+	return stats
 }
 
 func baselineExecutorAuths() []*coreauth.Auth {
@@ -236,6 +258,88 @@ func (s *Service) registerExecutorsForAuths(auths []*coreauth.Auth, forceReplace
 		}
 		s.registerExecutorForAuth(auth, forceReplace)
 	}
+}
+
+func (s *Service) registerExecutorsForAuthSnapshots(auths []coreauth.ExecutorRegistrationAuthSnapshot, forceReplace bool) executorRegistrationStats {
+	stats := executorRegistrationStats{authCount: len(auths)}
+	if len(auths) == 0 {
+		return stats
+	}
+
+	seen := make(map[executorRegistrationSnapshotKey]struct{}, len(auths))
+	providers := make(map[string]struct{})
+	for i := range auths {
+		snapshot := auths[i]
+		provider := strings.ToLower(strings.TrimSpace(snapshot.Provider))
+		if snapshot.Disabled && provider != "codex" {
+			stats.disabledCount++
+			continue
+		}
+		key := executorRegistrationKeyForSnapshot(snapshot)
+		if _, exists := seen[key]; exists {
+			stats.duplicateCount++
+			continue
+		}
+		seen[key] = struct{}{}
+
+		auth := executorRegistrationAuthFromSnapshot(snapshot)
+		if providerKey := executorProviderKeyForRegistration(auth); providerKey != "" {
+			providers[providerKey] = struct{}{}
+		}
+		s.registerExecutorForAuth(auth, forceReplace)
+		stats.registrationCount++
+	}
+	stats.providerCount = len(providers)
+	return stats
+}
+
+func executorRegistrationKeyForSnapshot(snapshot coreauth.ExecutorRegistrationAuthSnapshot) executorRegistrationSnapshotKey {
+	provider := strings.ToLower(strings.TrimSpace(snapshot.Provider))
+	authID := ""
+	if provider == "aistudio" {
+		authID = strings.TrimSpace(snapshot.ID)
+	}
+	return executorRegistrationSnapshotKey{
+		provider:          provider,
+		label:             strings.TrimSpace(snapshot.Label),
+		baseURL:           strings.TrimSpace(snapshot.BaseURL),
+		compatibilityName: strings.TrimSpace(snapshot.CompatibilityName),
+		providerKey:       strings.TrimSpace(snapshot.ProviderKey),
+		authID:            authID,
+	}
+}
+
+func executorRegistrationAuthFromSnapshot(snapshot coreauth.ExecutorRegistrationAuthSnapshot) *coreauth.Auth {
+	auth := &coreauth.Auth{
+		ID:       snapshot.ID,
+		Provider: snapshot.Provider,
+		Label:    snapshot.Label,
+		Disabled: snapshot.Disabled,
+	}
+	if snapshot.BaseURL != "" || snapshot.CompatibilityName != "" || snapshot.ProviderKey != "" {
+		auth.Attributes = make(map[string]string, 3)
+		if snapshot.BaseURL != "" {
+			auth.Attributes["base_url"] = snapshot.BaseURL
+		}
+		if snapshot.CompatibilityName != "" {
+			auth.Attributes["compat_name"] = snapshot.CompatibilityName
+		}
+		if snapshot.ProviderKey != "" {
+			auth.Attributes["provider_key"] = snapshot.ProviderKey
+		}
+	}
+	return auth
+}
+
+func executorProviderKeyForRegistration(auth *coreauth.Auth) string {
+	if compatProviderKey, _, isCompat := openAICompatInfoFromAuth(auth); isCompat {
+		return compatProviderKey
+	}
+	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
+	if provider == "" {
+		return "openai-compatibility"
+	}
+	return provider
 }
 
 func (s *Service) registerExecutorForAuth(a *coreauth.Auth, forceReplace bool) {
