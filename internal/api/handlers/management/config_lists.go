@@ -1833,6 +1833,13 @@ func normalizedOpenAICompatibilityEntries(entries []config.OpenAICompatibility) 
 				policy.PenaltyRules[ruleIndex].Match = append([]string(nil), copyEntry.CredentialPolicy.PenaltyRules[ruleIndex].Match...)
 				policy.PenaltyRules[ruleIndex].MatchRegexr = append([]string(nil), copyEntry.CredentialPolicy.PenaltyRules[ruleIndex].MatchRegexr...)
 			}
+			if copyEntry.CredentialPolicy.DeadCredential != nil {
+				dead := *copyEntry.CredentialPolicy.DeadCredential
+				dead.Statuses = append([]int(nil), copyEntry.CredentialPolicy.DeadCredential.Statuses...)
+				dead.Match = append([]string(nil), copyEntry.CredentialPolicy.DeadCredential.Match...)
+				dead.MatchRegexr = append([]string(nil), copyEntry.CredentialPolicy.DeadCredential.MatchRegexr...)
+				policy.DeadCredential = &dead
+			}
 			copyEntry.CredentialPolicy = &policy
 		}
 		normalizeOpenAICompatibilityEntry(&copyEntry)

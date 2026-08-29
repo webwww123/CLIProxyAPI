@@ -1115,6 +1115,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	}
 
 	m.hook.OnResult(ctx, result)
+	m.notifyResultObservers(ctx, result, authSnapshot)
 	m.publishErrorEvent(result, authSnapshot)
 	m.updateSessionAffinity(result)
 }

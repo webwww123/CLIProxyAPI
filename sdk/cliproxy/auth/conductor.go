@@ -92,6 +92,11 @@ type Hook interface {
 	OnResult(ctx context.Context, result Result)
 }
 
+// ResultObserver receives a completed local execution result and a secret-bearing
+// runtime auth snapshot. Observers must return quickly and must not persist or log
+// raw credential material.
+type ResultObserver func(context.Context, Result, *Auth)
+
 // NoopHook provides optional hook defaults.
 type NoopHook struct{}
 
@@ -113,6 +118,9 @@ type Manager struct {
 	selector                  Selector
 	hook                      Hook
 	mu                        sync.RWMutex
+	resultObserverMu          sync.RWMutex
+	resultObservers           map[uint64]ResultObserver
+	nextResultObserverID      uint64
 	selectorMu                sync.Mutex
 	configCooldownMu          sync.Mutex
 	auths                     map[string]*Auth
@@ -183,6 +191,7 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 		selector:                        selector,
 		hook:                            hook,
 		auths:                           make(map[string]*Auth),
+		resultObservers:                 make(map[uint64]ResultObserver),
 		homeRuntimeAuths:                make(map[string]map[string]*Auth),
 		homeRuntimeAuthOwners:           make(map[string]map[string]*HomeDispatchSelection),
 		homeSessionSelections:           make(map[string]map[homeSessionSelectionKey]*HomeDispatchSelection),
@@ -201,4 +210,63 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 	}
 	manager.scheduler = newAuthScheduler(selector)
 	return manager
+}
+
+// AddResultObserver registers a lightweight observer for non-ephemeral execution
+// results recorded through MarkResult. The returned function removes the observer
+// and is safe to call more than once.
+func (m *Manager) AddResultObserver(observer ResultObserver) func() {
+	if m == nil || observer == nil {
+		return func() {}
+	}
+	m.resultObserverMu.Lock()
+	if m.resultObservers == nil {
+		m.resultObservers = make(map[uint64]ResultObserver)
+	}
+	m.nextResultObserverID++
+	id := m.nextResultObserverID
+	m.resultObservers[id] = observer
+	m.resultObserverMu.Unlock()
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			m.resultObserverMu.Lock()
+			delete(m.resultObservers, id)
+			m.resultObserverMu.Unlock()
+		})
+	}
+}
+
+func (m *Manager) notifyResultObservers(ctx context.Context, result Result, auth *Auth) {
+	if m == nil {
+		return
+	}
+	m.resultObserverMu.RLock()
+	if len(m.resultObservers) == 0 {
+		m.resultObserverMu.RUnlock()
+		return
+	}
+	if len(m.resultObservers) == 1 {
+		var observer ResultObserver
+		for _, registered := range m.resultObservers {
+			observer = registered
+		}
+		m.resultObserverMu.RUnlock()
+		if observer != nil {
+			observer(ctx, result, auth)
+		}
+		return
+	}
+	observers := make([]ResultObserver, 0, len(m.resultObservers))
+	for _, observer := range m.resultObservers {
+		observers = append(observers, observer)
+	}
+	m.resultObserverMu.RUnlock()
+	for _, observer := range observers {
+		if observer == nil {
+			continue
+		}
+		observer(ctx, result, auth)
+	}
 }

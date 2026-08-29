@@ -736,6 +736,39 @@ type OpenAICompatibilityCredentialPolicy struct {
 
 	// ManualTestTimeoutSeconds bounds each management-triggered credential test.
 	ManualTestTimeoutSeconds int `yaml:"manual-test-timeout-seconds,omitempty" json:"manual-test-timeout-seconds,omitempty"`
+
+	// DeadCredential controls opt-in automatic detection and removal of credentials
+	// that repeatedly fail authentication for this OpenAI-compatible provider.
+	DeadCredential *OpenAICompatibilityDeadCredentialPolicy `yaml:"dead-credential,omitempty" json:"dead-credential,omitempty"`
+}
+
+// OpenAICompatibilityDeadCredentialPolicy controls provider-specific dead-key
+// detection. It is intentionally disabled unless Enabled is set explicitly.
+type OpenAICompatibilityDeadCredentialPolicy struct {
+	// Enabled enables result-based dead-credential tracking for this provider.
+	Enabled bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+
+	// Statuses lists HTTP statuses that may indicate a dead credential.
+	// When enabled and empty, normalization defaults this to 401.
+	Statuses []int `yaml:"statuses,omitempty" json:"statuses,omitempty"`
+
+	// Match performs case-insensitive substring matching against the error code/message.
+	Match []string `yaml:"match,omitempty" json:"match,omitempty"`
+
+	// MatchRegexr performs regular-expression matching against the error code/message.
+	MatchRegexr []string `yaml:"match-regexr,omitempty" json:"match-regexr,omitempty"`
+
+	// Confirmations is the number of matching failures required within the window.
+	Confirmations int `yaml:"confirmations,omitempty" json:"confirmations,omitempty"`
+
+	// WindowSeconds is the maximum age of the first matching failure in a sequence.
+	WindowSeconds int `yaml:"window-seconds,omitempty" json:"window-seconds,omitempty"`
+
+	// Action is either dry-run (default) or delete. Unknown values normalize to dry-run.
+	Action string `yaml:"action,omitempty" json:"action,omitempty"`
+
+	// MaxDeletionsPerHour limits automatic deletes for one provider.
+	MaxDeletionsPerHour int `yaml:"max-deletions-per-hour,omitempty" json:"max-deletions-per-hour,omitempty"`
 }
 
 // OpenAICompatibilityCredentialPolicyRule overrides the base credential

@@ -60,6 +60,7 @@ type Handler struct {
 	pluginStoreHTTPClient   pluginstore.HTTPDoer
 	pluginReleaseCacheMu    sync.Mutex
 	pluginReleaseCache      map[string]pluginReleaseCacheEntry
+	deadCredentialReaper    *deadCredentialReaper
 }
 
 type configReloadSnapshot struct {
@@ -81,8 +82,22 @@ func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Man
 		allowRemoteOverride: envSecret != "",
 		envSecret:           envSecret,
 	}
+	// Automatic dead-credential removal needs a durable config path. Handlers
+	// created for in-memory/test use should not register a result observer or
+	// start an otherwise unnecessary background worker.
+	if strings.TrimSpace(configFilePath) != "" {
+		h.deadCredentialReaper = newDeadCredentialReaper(h, manager)
+	}
 	h.startAttemptCleanup()
 	return h
+}
+
+// Close stops background management workers owned by the handler.
+func (h *Handler) Close() {
+	if h == nil || h.deadCredentialReaper == nil {
+		return
+	}
+	h.deadCredentialReaper.close()
 }
 
 // startAttemptCleanup launches a background goroutine that periodically

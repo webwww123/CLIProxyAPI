@@ -28,6 +28,15 @@ openai-compatibility:
       manual-test-concurrency: 8
       manual-test-max-models: 5
       manual-test-timeout-seconds: 45
+      dead-credential:
+        enabled: true
+        statuses: [403, 401, 403, 200]
+        match: ["invalid key", "invalid key"]
+        match-regexr: ["denied$", "["]
+        confirmations: 3
+        window-seconds: 120
+        action: remove
+        max-deletions-per-hour: 7
     api-key-entries:
       - api-key: test-key
     models:
@@ -67,6 +76,10 @@ openai-compatibility:
 	if policy.ManualTestConcurrency != 8 || policy.ManualTestMaxModels != 5 || policy.ManualTestTimeoutSeconds != 45 {
 		t.Fatalf("manual test policy = %+v", policy)
 	}
+	dead := policy.DeadCredential
+	if dead == nil || !dead.Enabled || len(dead.Statuses) != 2 || dead.Statuses[0] != 401 || dead.Statuses[1] != 403 || len(dead.Match) != 1 || len(dead.MatchRegexr) != 1 || dead.Confirmations != 3 || dead.WindowSeconds != 120 || dead.Action != "delete" || dead.MaxDeletionsPerHour != 7 {
+		t.Fatalf("dead credential policy = %+v", dead)
+	}
 }
 
 func TestNormalizeOpenAICompatibilityCredentialPolicyDefaultsAndDisable(t *testing.T) {
@@ -103,5 +116,41 @@ func TestNormalizeOpenAICompatibilityCredentialPolicyDefaultsAndDisable(t *testi
 	}
 	if rulesOnly.InitialCooldownSeconds != 864000 || rulesOnly.MaxCooldownSeconds != 864000 || rulesOnly.CooldownJitterPercent != 50 {
 		t.Fatalf("rules-only clamps = %+v", rulesOnly)
+	}
+
+	deadDefaults := NormalizeOpenAICompatibilityCredentialPolicy(&OpenAICompatibilityCredentialPolicy{
+		DeadCredential: &OpenAICompatibilityDeadCredentialPolicy{Enabled: true},
+	})
+	if deadDefaults == nil || deadDefaults.DeadCredential == nil {
+		t.Fatal("dead credential defaults = nil")
+	}
+	dead := deadDefaults.DeadCredential
+	if len(dead.Statuses) != 1 || dead.Statuses[0] != 401 || dead.Confirmations != 2 || dead.WindowSeconds != 86400 || dead.Action != "dry-run" || dead.MaxDeletionsPerHour != 10 {
+		t.Fatalf("dead credential defaults = %+v", dead)
+	}
+
+	deadClamped := NormalizeOpenAICompatibilityCredentialPolicy(&OpenAICompatibilityCredentialPolicy{
+		DeadCredential: &OpenAICompatibilityDeadCredentialPolicy{
+			Enabled:             true,
+			Statuses:            []int{399, 600, 503, 503},
+			Confirmations:       99,
+			WindowSeconds:       99 * 24 * 60 * 60,
+			Action:              "unexpected",
+			MaxDeletionsPerHour: 9999,
+		},
+	})
+	if deadClamped == nil || deadClamped.DeadCredential == nil {
+		t.Fatal("dead credential clamped policy = nil")
+	}
+	dead = deadClamped.DeadCredential
+	if len(dead.Statuses) != 1 || dead.Statuses[0] != 503 || dead.Confirmations != 10 || dead.WindowSeconds != 30*24*60*60 || dead.Action != "dry-run" || dead.MaxDeletionsPerHour != 1000 {
+		t.Fatalf("dead credential clamps = %+v", dead)
+	}
+
+	disabled := NormalizeOpenAICompatibilityCredentialPolicy(&OpenAICompatibilityCredentialPolicy{
+		DeadCredential: &OpenAICompatibilityDeadCredentialPolicy{Action: "off"},
+	})
+	if disabled == nil || disabled.DeadCredential == nil || disabled.DeadCredential.Action != "disabled" {
+		t.Fatalf("disabled dead credential policy = %+v", disabled)
 	}
 }

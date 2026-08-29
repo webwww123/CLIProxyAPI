@@ -66,6 +66,13 @@ func cloneProviderCredentialPolicy(policy *internalconfig.OpenAICompatibilityCre
 		cloned.PenaltyRules[i].Match = append([]string(nil), policy.PenaltyRules[i].Match...)
 		cloned.PenaltyRules[i].MatchRegexr = append([]string(nil), policy.PenaltyRules[i].MatchRegexr...)
 	}
+	if policy.DeadCredential != nil {
+		dead := *policy.DeadCredential
+		dead.Statuses = append([]int(nil), policy.DeadCredential.Statuses...)
+		dead.Match = append([]string(nil), policy.DeadCredential.Match...)
+		dead.MatchRegexr = append([]string(nil), policy.DeadCredential.MatchRegexr...)
+		cloned.DeadCredential = &dead
+	}
 	return cloned
 }
 

@@ -636,6 +636,16 @@ nonstream-keepalive-interval: 0
 #       manual-test-concurrency: 4 # management-triggered tests of cooling credentials
 #       manual-test-max-models: 3 # current non-image upstream models tried when no model is supplied
 #       manual-test-timeout-seconds: 30
+#       dead-credential: # optional traffic-based dead-key detector; disabled unless enabled=true
+#         enabled: true
+#         statuses: [401] # provider-specific HTTP statuses; empty + enabled defaults to [401]
+#         match: ["authentication failed"] # optional case-insensitive body/code substring filters
+#         match-regexr: [] # optional body/code regular expressions
+#         confirmations: 2 # matching failures required for one key within the window
+#         window-seconds: 86400 # confirmation window; default 24 hours
+#         action: dry-run # dry-run logs candidates; use delete only after a canary review
+#         max-deletions-per-hour: 10 # safety rate limit for this provider
+#       # Tracking starts with new traffic; confirmation state is intentionally not persisted across restart.
 #     request-scoped-errors: # optional: custom rules to classify upstream errors by status and body patterns
 #       - status: 400
 #         match:

@@ -14,6 +14,9 @@ const (
 	maxProviderCredentialManualTestConcurrency = 64
 	maxProviderCredentialManualTestModels      = 10
 	maxProviderCredentialManualTestTimeout     = 300
+	maxDeadCredentialConfirmations             = 10
+	maxDeadCredentialWindowSeconds             = 30 * 24 * 60 * 60
+	maxDeadCredentialDeletesPerHour            = 1000
 )
 
 // NormalizePluginsConfig applies default plugin configuration values.
@@ -184,7 +187,8 @@ func (cfg *Config) SanitizeOpenAICompatibility() {
 }
 
 // NormalizeOpenAICompatibilityCredentialPolicy validates and defaults an opt-in
-// OpenAI-compatible credential policy. A policy with no valid status codes is disabled.
+// OpenAI-compatible credential policy. A policy with no valid cooldown rules and
+// no dead-credential block is disabled.
 func NormalizeOpenAICompatibilityCredentialPolicy(policy *OpenAICompatibilityCredentialPolicy) *OpenAICompatibilityCredentialPolicy {
 	if policy == nil {
 		return nil
@@ -266,7 +270,43 @@ func NormalizeOpenAICompatibilityCredentialPolicy(policy *OpenAICompatibilityCre
 		rules = append(rules, rule)
 	}
 	normalized.PenaltyRules = rules
-	if len(normalized.ScopeStatuses) == 0 && len(normalized.PenaltyRules) == 0 {
+	if normalized.DeadCredential != nil {
+		dead := *normalized.DeadCredential
+		dead.Statuses = normalizeCredentialPolicyStatuses(dead.Statuses)
+		if dead.Enabled && len(dead.Statuses) == 0 {
+			dead.Statuses = []int{401}
+		}
+		dead.Match = normalizeCredentialPolicyPatterns(dead.Match, false)
+		dead.MatchRegexr = normalizeCredentialPolicyPatterns(dead.MatchRegexr, true)
+		if dead.Confirmations <= 0 {
+			dead.Confirmations = 2
+		}
+		if dead.Confirmations > maxDeadCredentialConfirmations {
+			dead.Confirmations = maxDeadCredentialConfirmations
+		}
+		if dead.WindowSeconds <= 0 {
+			dead.WindowSeconds = 24 * 60 * 60
+		}
+		if dead.WindowSeconds > maxDeadCredentialWindowSeconds {
+			dead.WindowSeconds = maxDeadCredentialWindowSeconds
+		}
+		switch strings.ToLower(strings.TrimSpace(dead.Action)) {
+		case "delete", "remove":
+			dead.Action = "delete"
+		case "disabled", "disable", "off":
+			dead.Action = "disabled"
+		default:
+			dead.Action = "dry-run"
+		}
+		if dead.MaxDeletionsPerHour <= 0 {
+			dead.MaxDeletionsPerHour = 10
+		}
+		if dead.MaxDeletionsPerHour > maxDeadCredentialDeletesPerHour {
+			dead.MaxDeletionsPerHour = maxDeadCredentialDeletesPerHour
+		}
+		normalized.DeadCredential = &dead
+	}
+	if len(normalized.ScopeStatuses) == 0 && len(normalized.PenaltyRules) == 0 && normalized.DeadCredential == nil {
 		return nil
 	}
 
@@ -308,6 +348,23 @@ func NormalizeOpenAICompatibilityCredentialPolicy(policy *OpenAICompatibilityCre
 		normalized.ProbeConcurrency = 64
 	}
 	return &normalized
+}
+
+func normalizeCredentialPolicyStatuses(values []int) []int {
+	out := make([]int, 0, len(values))
+	seen := make(map[int]struct{}, len(values))
+	for _, status := range values {
+		if status < 400 || status > 599 {
+			continue
+		}
+		if _, ok := seen[status]; ok {
+			continue
+		}
+		seen[status] = struct{}{}
+		out = append(out, status)
+	}
+	sort.Ints(out)
+	return out
 }
 
 func normalizeCredentialPolicyPatterns(values []string, validateRegex bool) []string {

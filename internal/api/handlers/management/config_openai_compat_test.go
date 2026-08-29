@@ -153,3 +153,28 @@ func TestPatchOpenAICompatCredentialPolicy(t *testing.T) {
 		t.Fatalf("credential-policy = %#v", policy)
 	}
 }
+
+func TestNormalizedOpenAICompatibilityEntriesDeepCopiesDeadCredentialPolicy(t *testing.T) {
+	dead := &config.OpenAICompatibilityDeadCredentialPolicy{
+		Enabled:     true,
+		Statuses:    []int{401},
+		Match:       []string{"authentication failed"},
+		MatchRegexr: []string{"^auth"},
+	}
+	entries := normalizedOpenAICompatibilityEntries([]config.OpenAICompatibility{{
+		Name: "copy-test",
+		CredentialPolicy: &config.OpenAICompatibilityCredentialPolicy{
+			DeadCredential: dead,
+		},
+	}})
+	if len(entries) != 1 || entries[0].CredentialPolicy == nil || entries[0].CredentialPolicy.DeadCredential == nil {
+		t.Fatalf("normalized entries = %#v", entries)
+	}
+
+	entries[0].CredentialPolicy.DeadCredential.Statuses[0] = 403
+	entries[0].CredentialPolicy.DeadCredential.Match[0] = "changed"
+	entries[0].CredentialPolicy.DeadCredential.MatchRegexr[0] = "changed"
+	if dead.Statuses[0] != 401 || dead.Match[0] != "authentication failed" || dead.MatchRegexr[0] != "^auth" {
+		t.Fatalf("dead credential policy shares mutable storage: %+v", dead)
+	}
+}
