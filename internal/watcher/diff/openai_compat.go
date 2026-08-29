@@ -75,6 +75,8 @@ func uniqueOpenAICompatKey(existing map[string]config.OpenAICompatibility, entry
 func describeOpenAICompatibilityUpdate(oldEntry, newEntry config.OpenAICompatibility) string {
 	oldKeyCount := countAPIKeys(oldEntry)
 	newKeyCount := countAPIKeys(newEntry)
+	oldDisabledKeyCount := countDisabledAPIKeys(oldEntry)
+	newDisabledKeyCount := countDisabledAPIKeys(newEntry)
 	oldModelCount := countOpenAIModels(oldEntry.Models)
 	newModelCount := countOpenAIModels(newEntry.Models)
 	details := make([]string, 0, 5)
@@ -99,6 +101,9 @@ func describeOpenAICompatibilityUpdate(oldEntry, newEntry config.OpenAICompatibi
 	if oldKeyCount != newKeyCount {
 		details = append(details, fmt.Sprintf("api-keys %d -> %d", oldKeyCount, newKeyCount))
 	}
+	if oldDisabledKeyCount != newDisabledKeyCount {
+		details = append(details, fmt.Sprintf("disabled-api-keys %d -> %d", oldDisabledKeyCount, newDisabledKeyCount))
+	}
 	if oldModelCount != newModelCount {
 		details = append(details, fmt.Sprintf("models %d -> %d", oldModelCount, newModelCount))
 	}
@@ -115,6 +120,16 @@ func countAPIKeys(entry config.OpenAICompatibility) int {
 	count := 0
 	for _, keyEntry := range entry.APIKeyEntries {
 		if strings.TrimSpace(keyEntry.APIKey) != "" {
+			count++
+		}
+	}
+	return count
+}
+
+func countDisabledAPIKeys(entry config.OpenAICompatibility) int {
+	count := 0
+	for _, keyEntry := range entry.APIKeyEntries {
+		if strings.TrimSpace(keyEntry.APIKey) != "" && keyEntry.Disabled {
 			count++
 		}
 	}

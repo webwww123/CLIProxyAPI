@@ -737,8 +737,8 @@ type OpenAICompatibilityCredentialPolicy struct {
 	// ManualTestTimeoutSeconds bounds each management-triggered credential test.
 	ManualTestTimeoutSeconds int `yaml:"manual-test-timeout-seconds,omitempty" json:"manual-test-timeout-seconds,omitempty"`
 
-	// DeadCredential controls opt-in automatic detection and removal of credentials
-	// that repeatedly fail authentication for this OpenAI-compatible provider.
+	// DeadCredential controls opt-in automatic detection and lifecycle handling of
+	// credentials that repeatedly fail authentication for this OpenAI-compatible provider.
 	DeadCredential *OpenAICompatibilityDeadCredentialPolicy `yaml:"dead-credential,omitempty" json:"dead-credential,omitempty"`
 }
 
@@ -764,10 +764,12 @@ type OpenAICompatibilityDeadCredentialPolicy struct {
 	// WindowSeconds is the maximum age of the first matching failure in a sequence.
 	WindowSeconds int `yaml:"window-seconds,omitempty" json:"window-seconds,omitempty"`
 
-	// Action is either dry-run (default) or delete. Unknown values normalize to dry-run.
+	// Action is dry-run (default), disable (keep the key but exclude it from routing),
+	// or delete. The legacy value "disabled" turns the detector off and is kept for
+	// backwards compatibility; unknown values normalize to dry-run.
 	Action string `yaml:"action,omitempty" json:"action,omitempty"`
 
-	// MaxDeletionsPerHour limits automatic deletes for one provider.
+	// MaxDeletionsPerHour limits automatic delete/disable actions for one provider.
 	MaxDeletionsPerHour int `yaml:"max-deletions-per-hour,omitempty" json:"max-deletions-per-hour,omitempty"`
 }
 
@@ -795,6 +797,10 @@ type OpenAICompatibilityCredentialPolicyRule struct {
 type OpenAICompatibilityAPIKey struct {
 	// APIKey is the authentication key for accessing the external API services.
 	APIKey string `yaml:"api-key" json:"api-key"`
+
+	// Disabled keeps this credential in configuration but excludes it from routing.
+	// It can be cleared later through the management API or a hot configuration update.
+	Disabled bool `yaml:"disabled,omitempty" json:"disabled,omitempty"`
 
 	// Weight controls proportional selection under weighted-round-robin.
 	// An omitted value defaults to 1; non-positive values exclude this credential; maximum 1,000,000.

@@ -693,6 +693,40 @@ func TestConfigSynthesizer_OpenAICompat(t *testing.T) {
 	}
 }
 
+func TestConfigSynthesizer_OpenAICompatPropagatesCredentialDisabledState(t *testing.T) {
+	synth := NewConfigSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			OpenAICompatibility: []config.OpenAICompatibility{{
+				Name:    "nvidia",
+				BaseURL: "https://integrate.example/v1",
+				APIKeyEntries: []config.OpenAICompatibilityAPIKey{
+					{APIKey: "active-key"},
+					{APIKey: "disabled-key", Disabled: true},
+				},
+			}},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+	auths, errSynthesize := synth.Synthesize(ctx)
+	if errSynthesize != nil {
+		t.Fatalf("unexpected error: %v", errSynthesize)
+	}
+	if len(auths) != 2 {
+		t.Fatalf("auth count = %d, want 2", len(auths))
+	}
+	if auths[0].Disabled || auths[0].Status != coreauth.StatusActive {
+		t.Fatalf("active auth state = disabled=%v status=%s", auths[0].Disabled, auths[0].Status)
+	}
+	if !auths[1].Disabled || auths[1].Status != coreauth.StatusDisabled {
+		t.Fatalf("disabled auth state = disabled=%v status=%s", auths[1].Disabled, auths[1].Status)
+	}
+	if got, _ := auths[1].Metadata["disabled"].(bool); !got {
+		t.Fatalf("disabled auth metadata = %#v, want true", auths[1].Metadata["disabled"])
+	}
+}
+
 func TestConfigSynthesizer_OpenAICompat_UsesNamespacedProviderKey(t *testing.T) {
 	synth := NewConfigSynthesizer()
 	ctx := &SynthesisContext{

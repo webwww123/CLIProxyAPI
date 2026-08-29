@@ -643,8 +643,10 @@ nonstream-keepalive-interval: 0
 #         match-regexr: [] # optional body/code regular expressions
 #         confirmations: 2 # matching failures required for one key within the window
 #         window-seconds: 86400 # confirmation window; default 24 hours
-#         action: dry-run # dry-run logs candidates; use delete only after a canary review
-#         max-deletions-per-hour: 10 # safety rate limit for this provider
+#         action: dry-run # dry-run logs candidates; disable keeps the key but removes it from routing; delete removes it
+#         # action: disable # use this to automatically disable repeatedly dead keys without deleting them
+#         # action: disabled # legacy: turn the dead-key detector off entirely
+#         max-deletions-per-hour: 10 # safety rate limit for automatic delete/disable actions for this provider
 #       # Tracking starts with new traffic; confirmation state is intentionally not persisted across restart.
 #     request-scoped-errors: # optional: custom rules to classify upstream errors by status and body patterns
 #       - status: 400
@@ -662,6 +664,7 @@ nonstream-keepalive-interval: 0
 #       # X-Claude-Code-Session-Id: "$ABC" # copies client's "ABC" header
 #     api-key-entries:
 #       - api-key: "sk-or-v1-...b780"
+#         disabled: false # optional: keep this key visible but exclude it from routing; clear to re-enable
 #         weight: 5 # optional: weighted-round-robin share; omitted defaults to 1; maximum 1,000,000
 #         proxy-url: "socks5://proxy.example.com:1080" # optional: per-key proxy override
 #         # proxy-url: "direct" # optional: explicit direct connect for this credential

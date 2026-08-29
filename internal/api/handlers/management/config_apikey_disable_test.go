@@ -1,8 +1,15 @@
 package management
 
 import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strconv"
+	"strings"
 	"testing"
 
+	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/synthesizer"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -44,6 +51,98 @@ func TestToggleConfigAPIKeyExcludedAll_XAI(t *testing.T) {
 	}
 	if len(cfg.XAIKey[0].ExcludedModels) != 1 || cfg.XAIKey[0].ExcludedModels[0] != "*" {
 		t.Fatalf("excluded-models = %#v, want [*]", cfg.XAIKey[0].ExcludedModels)
+	}
+}
+
+func TestToggleConfigAPIKeyDisabled_OpenAICompatibility(t *testing.T) {
+	cfg := &config.Config{
+		OpenAICompatibility: []config.OpenAICompatibility{{
+			Name:    "nvidia",
+			BaseURL: "https://integrate.example/v1",
+			APIKeyEntries: []config.OpenAICompatibilityAPIKey{
+				{APIKey: "key-a"},
+				{APIKey: "key-b"},
+			},
+		}},
+	}
+	idGen := synthesizer.NewStableIDGenerator()
+	firstID, _ := idGen.Next("openai-compatibility:nvidia", "key-a", "https://integrate.example/v1", "")
+	auth := &coreauth.Auth{
+		ID:       firstID,
+		Provider: "openai-compatible-nvidia",
+		Attributes: map[string]string{
+			"api_key":      "key-a",
+			"base_url":     "https://integrate.example/v1",
+			"compat_name":  "nvidia",
+			"provider_key": "openai-compatible-nvidia",
+			"source":       "config:nvidia[test]",
+		},
+	}
+
+	handled, errToggle := toggleConfigAPIKeyDisabled(cfg, auth, true)
+	if errToggle != nil || !handled {
+		t.Fatalf("toggle disable: handled=%v err=%v", handled, errToggle)
+	}
+	if !cfg.OpenAICompatibility[0].APIKeyEntries[0].Disabled || cfg.OpenAICompatibility[0].APIKeyEntries[1].Disabled {
+		t.Fatalf("disabled entries = %+v", cfg.OpenAICompatibility[0].APIKeyEntries)
+	}
+	handled, errToggle = toggleConfigAPIKeyDisabled(cfg, auth, false)
+	if errToggle != nil || !handled {
+		t.Fatalf("toggle enable: handled=%v err=%v", handled, errToggle)
+	}
+	if cfg.OpenAICompatibility[0].APIKeyEntries[0].Disabled {
+		t.Fatal("explicit disabled flag was not cleared")
+	}
+}
+
+func TestPatchAuthFileStatus_OpenAICompatibilityUsesExplicitDisabled(t *testing.T) {
+	cfg := &config.Config{OpenAICompatibility: []config.OpenAICompatibility{{
+		Name:          "nvidia",
+		BaseURL:       "https://integrate.example/v1",
+		APIKeyEntries: []config.OpenAICompatibilityAPIKey{{APIKey: "key-a"}},
+	}}}
+	configPath := writeTestConfigFile(t)
+	manager := coreauth.NewManager(nil, nil, nil)
+	synth := synthesizer.NewConfigSynthesizer()
+	auths, errSynthesize := synth.Synthesize(&synthesizer.SynthesisContext{
+		Config:      cfg,
+		IDGenerator: synthesizer.NewStableIDGenerator(),
+	})
+	if errSynthesize != nil || len(auths) != 1 {
+		t.Fatalf("synthesize auths: count=%d err=%v", len(auths), errSynthesize)
+	}
+	if _, errRegister := manager.Register(context.Background(), auths[0]); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+	h := NewHandler(cfg, configPath, manager)
+	defer h.Close()
+
+	patch := func(disabled bool) (int, map[string]any) {
+		rec := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(rec)
+		ctx.Request = httptest.NewRequest(http.MethodPatch, "/v0/management/auth-files/status", strings.NewReader(`{"name":"`+auths[0].ID+`","disabled":`+strconv.FormatBool(disabled)+`}`))
+		h.PatchAuthFileStatus(ctx)
+		var body map[string]any
+		_ = json.Unmarshal(rec.Body.Bytes(), &body)
+		return rec.Code, body
+	}
+
+	status, body := patch(true)
+	if status != http.StatusOK || body["via"] != "config:disabled" {
+		t.Fatalf("disable response = %d %#v", status, body)
+	}
+	loaded, errLoad := config.LoadConfig(configPath)
+	if errLoad != nil || !loaded.OpenAICompatibility[0].APIKeyEntries[0].Disabled {
+		t.Fatalf("persisted disabled state = %+v err=%v", loaded, errLoad)
+	}
+
+	status, body = patch(false)
+	if status != http.StatusOK || body["via"] != "config:disabled" {
+		t.Fatalf("enable response = %d %#v", status, body)
+	}
+	loaded, errLoad = config.LoadConfig(configPath)
+	if errLoad != nil || loaded.OpenAICompatibility[0].APIKeyEntries[0].Disabled {
+		t.Fatalf("persisted enabled state = %+v err=%v", loaded, errLoad)
 	}
 }
 

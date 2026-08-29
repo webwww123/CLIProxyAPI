@@ -293,7 +293,9 @@ func NormalizeOpenAICompatibilityCredentialPolicy(policy *OpenAICompatibilityCre
 		switch strings.ToLower(strings.TrimSpace(dead.Action)) {
 		case "delete", "remove":
 			dead.Action = "delete"
-		case "disabled", "disable", "off":
+		case "disable", "disable-key", "quarantine":
+			dead.Action = "disable"
+		case "disabled", "off":
 			dead.Action = "disabled"
 		default:
 			dead.Action = "dry-run"

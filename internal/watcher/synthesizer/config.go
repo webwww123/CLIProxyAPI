@@ -313,6 +313,13 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 				"config_index": strconv.Itoa(i),
 			}
 			metadata := map[string]any{}
+			status := coreauth.StatusActive
+			statusMessage := ""
+			if entry.Disabled {
+				status = coreauth.StatusDisabled
+				statusMessage = "disabled via config"
+				metadata["disabled"] = true
+			}
 			if disableCooling != nil {
 				metadata["disable_cooling"] = *disableCooling
 			}
@@ -330,16 +337,18 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 			}
 			addConfigHeadersToAttrs(compat.Headers, attrs)
 			a := &coreauth.Auth{
-				ID:         id,
-				Provider:   internalProviderKey,
-				Label:      compat.Name,
-				Prefix:     prefix,
-				Status:     coreauth.StatusActive,
-				ProxyURL:   proxyURL,
-				Attributes: attrs,
-				Metadata:   metadata,
-				CreatedAt:  now,
-				UpdatedAt:  now,
+				ID:            id,
+				Provider:      internalProviderKey,
+				Label:         compat.Name,
+				Prefix:        prefix,
+				Status:        status,
+				StatusMessage: statusMessage,
+				Disabled:      entry.Disabled,
+				ProxyURL:      proxyURL,
+				Attributes:    attrs,
+				Metadata:      metadata,
+				CreatedAt:     now,
+				UpdatedAt:     now,
 			}
 			if len(a.Metadata) == 0 {
 				a.Metadata = nil

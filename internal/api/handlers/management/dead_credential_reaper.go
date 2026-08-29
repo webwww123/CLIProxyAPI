@@ -53,6 +53,7 @@ type deadCredentialCandidate struct {
 	proxyURL            string
 	status              int
 	policyFingerprint   string
+	action              string
 	maxDeletionsPerHour int
 	nextAttemptAt       time.Time
 	retryCount          int
@@ -154,6 +155,10 @@ func (r *deadCredentialReaper) observeResultLocked(ctx context.Context, result c
 		r.resetStateLocked(result.AuthID)
 		return
 	}
+	if auth.Disabled || auth.Status == coreauth.StatusDisabled {
+		r.resetStateLocked(result.AuthID)
+		return
+	}
 	if result.Error == nil || !coreauth.IsConfigAPIKeyAuth(auth) {
 		if result.Error != nil {
 			r.resetStateLocked(result.AuthID)
@@ -162,7 +167,7 @@ func (r *deadCredentialReaper) observeResultLocked(ctx context.Context, result c
 	}
 
 	providerName, providerKey, policy, ok := r.policyForAuth(auth)
-	if !ok || policy == nil || !policy.Enabled || strings.EqualFold(policy.Action, "disabled") {
+	if !ok || policy == nil || !policy.Enabled || normalizedDeadCredentialAction(policy.Action) == "disabled" {
 		r.resetStateLocked(result.AuthID)
 		return
 	}
@@ -229,8 +234,9 @@ func (r *deadCredentialReaper) observeResultLocked(ctx context.Context, result c
 		return
 	}
 
-	if !strings.EqualFold(policy.Action, "delete") {
-		log.WithFields(fields).Warn("dead credential matched in dry-run mode; no credential removed")
+	action := normalizedDeadCredentialAction(policy.Action)
+	if action != "delete" && action != "disable" {
+		log.WithFields(fields).Warn("dead credential matched in dry-run mode; no credential action taken")
 		return
 	}
 
@@ -242,7 +248,7 @@ func (r *deadCredentialReaper) observeResultLocked(ctx context.Context, result c
 		baseURL = strings.TrimSpace(auth.Attributes["base_url"])
 	}
 	if apiKey == "" {
-		log.WithFields(fields).Warn("dead credential matched but has no config API key identity; removal skipped")
+		log.WithFields(fields).Warn("dead credential matched but has no config API key identity; action skipped")
 		return
 	}
 
@@ -256,6 +262,7 @@ func (r *deadCredentialReaper) observeResultLocked(ctx context.Context, result c
 		proxyURL:            proxyURL,
 		status:              result.Error.HTTPStatus,
 		policyFingerprint:   policyFingerprint,
+		action:              action,
 		maxDeletionsPerHour: policy.MaxDeletionsPerHour,
 	}
 	key := deadCredentialPendingKey(candidate)
@@ -266,7 +273,8 @@ func (r *deadCredentialReaper) observeResultLocked(ctx context.Context, result c
 	case r.wake <- struct{}{}:
 	default:
 	}
-	log.WithFields(fields).Warn("dead credential queued for removal")
+	fields["action"] = action
+	log.WithFields(fields).Warn("dead credential queued for automatic action")
 }
 
 func (r *deadCredentialReaper) resetState(authID string) {
@@ -313,6 +321,19 @@ func deadCredentialPolicyFingerprint(policy *config.OpenAICompatibilityDeadCrede
 	}
 	sum := sha256.Sum256([]byte(b.String()))
 	return hex.EncodeToString(sum[:8])
+}
+
+func normalizedDeadCredentialAction(action string) string {
+	switch strings.ToLower(strings.TrimSpace(action)) {
+	case "delete", "remove":
+		return "delete"
+	case "disable", "disable-key", "quarantine":
+		return "disable"
+	case "disabled", "off":
+		return "disabled"
+	default:
+		return "dry-run"
+	}
 }
 
 func (r *deadCredentialReaper) policyForAuth(auth *coreauth.Auth) (string, string, *config.OpenAICompatibilityDeadCredentialPolicy, bool) {
@@ -512,7 +533,7 @@ func (r *deadCredentialReaper) flushLocked() {
 				}
 			}
 			r.requeueUntil(group, retryAt)
-			log.WithFields(log.Fields{"provider": provider, "base_url_ref": deadCredentialBaseURLRef(group[0].baseURL), "pending": len(group), "limit_per_hour": limit}).Warn("dead credential delete rate limit reached")
+			log.WithFields(log.Fields{"provider": provider, "base_url_ref": deadCredentialBaseURLRef(group[0].baseURL), "action": normalizedDeadCredentialAction(group[0].action), "pending": len(group), "limit_per_hour": limit}).Warn("dead credential action rate limit reached")
 			continue
 		}
 		if available > len(group) {
@@ -522,15 +543,29 @@ func (r *deadCredentialReaper) flushLocked() {
 		if len(group) > available {
 			r.requeueAfter(group[available:], time.Second)
 		}
-		removed, backupDir, errRemove := r.handler.removeDeadCredentialBatch(context.Background(), provider, selected)
-		if errRemove != nil {
-			r.requeue(selected)
-			log.WithFields(log.Fields{"provider": provider, "candidate_count": len(selected)}).WithError(errRemove).Error("dead credential batch removal failed")
+		action := normalizedDeadCredentialAction(selected[0].action)
+		changed := 0
+		backupDir := ""
+		var errAction error
+		switch action {
+		case "delete":
+			changed, backupDir, errAction = r.handler.removeDeadCredentialBatch(context.Background(), provider, selected)
+		case "disable":
+			changed, backupDir, errAction = r.handler.disableDeadCredentialBatch(context.Background(), provider, selected)
+		default:
+			for _, candidate := range selected {
+				r.resetStateLocked(candidate.authID)
+			}
 			continue
 		}
-		if removed > 0 {
+		if errAction != nil {
+			r.requeue(selected)
+			log.WithFields(log.Fields{"provider": provider, "action": action, "candidate_count": len(selected)}).WithError(errAction).Error("dead credential batch action failed")
+			continue
+		}
+		if changed > 0 {
 			r.mu.Lock()
-			for i := 0; i < removed; i++ {
+			for i := 0; i < changed; i++ {
 				r.deleteHistory[provider] = append(r.deleteHistory[provider], time.Now())
 			}
 			r.mu.Unlock()
@@ -542,7 +577,7 @@ func (r *deadCredentialReaper) flushLocked() {
 		for _, candidate := range selected {
 			r.resetStateLocked(candidate.authID)
 		}
-		log.WithFields(log.Fields{"provider": provider, "base_url_ref": deadCredentialBaseURLRef(selected[0].baseURL), "candidate_count": len(selected), "removed_count": removed, "backup_dir": backupDir}).Warn("dead credential batch removal completed")
+		log.WithFields(log.Fields{"provider": provider, "action": action, "base_url_ref": deadCredentialBaseURLRef(selected[0].baseURL), "candidate_count": len(selected), "changed_count": changed, "backup_dir": backupDir}).Warn("dead credential batch action completed")
 	}
 }
 
@@ -638,7 +673,7 @@ func (r *deadCredentialReaper) requeueUntil(candidates []deadCredentialCandidate
 }
 
 func deadCredentialGroupKey(candidate deadCredentialCandidate) string {
-	return strings.ToLower(strings.TrimSpace(candidate.providerKey)) + "\x00" + strings.ToLower(normalizeDeadCredentialBaseURL(candidate.baseURL))
+	return strings.ToLower(strings.TrimSpace(candidate.providerKey)) + "\x00" + strings.ToLower(normalizeDeadCredentialBaseURL(candidate.baseURL)) + "\x00" + normalizedDeadCredentialAction(candidate.action)
 }
 
 func deadCredentialPendingKey(candidate deadCredentialCandidate) string {
@@ -664,8 +699,20 @@ func deadCredentialRef(authID string) string {
 }
 
 func (h *Handler) removeDeadCredentialBatch(ctx context.Context, providerKey string, candidates []deadCredentialCandidate) (int, string, error) {
+	return h.mutateDeadCredentialBatch(ctx, providerKey, candidates, "delete")
+}
+
+func (h *Handler) disableDeadCredentialBatch(ctx context.Context, providerKey string, candidates []deadCredentialCandidate) (int, string, error) {
+	return h.mutateDeadCredentialBatch(ctx, providerKey, candidates, "disable")
+}
+
+func (h *Handler) mutateDeadCredentialBatch(ctx context.Context, providerKey string, candidates []deadCredentialCandidate, action string) (int, string, error) {
 	if h == nil || len(candidates) == 0 {
 		return 0, "", nil
+	}
+	action = normalizedDeadCredentialAction(action)
+	if action != "delete" && action != "disable" {
+		return 0, "", fmt.Errorf("unsupported dead credential action %q", action)
 	}
 	if strings.TrimSpace(h.configFilePath) == "" {
 		return 0, "", fmt.Errorf("config file path is empty")
@@ -686,7 +733,7 @@ func (h *Handler) removeDeadCredentialBatch(ctx context.Context, providerKey str
 		}
 	}
 	if len(providerIndexes) == 0 {
-		log.WithFields(log.Fields{"provider": providerKey, "candidate_count": len(candidates)}).Info("dead credential removal skipped because provider is no longer configured")
+		log.WithFields(log.Fields{"provider": providerKey, "action": action, "candidate_count": len(candidates)}).Info("dead credential action skipped because provider is no longer configured")
 		h.mu.Unlock()
 		return 0, "", nil
 	}
@@ -704,7 +751,7 @@ func (h *Handler) removeDeadCredentialBatch(ctx context.Context, providerKey str
 		}
 	}
 	if len(providerIndexes) != 1 {
-		log.WithFields(log.Fields{"provider": providerKey, "candidate_count": len(candidates)}).Warn("dead credential removal skipped because provider identity is ambiguous")
+		log.WithFields(log.Fields{"provider": providerKey, "action": action, "candidate_count": len(candidates)}).Warn("dead credential action skipped because provider identity is ambiguous")
 		h.mu.Unlock()
 		return 0, "", nil
 	}
@@ -712,8 +759,8 @@ func (h *Handler) removeDeadCredentialBatch(ctx context.Context, providerKey str
 
 	entry := h.cfg.OpenAICompatibility[providerIndex]
 	normalizedPolicy := config.NormalizeOpenAICompatibilityCredentialPolicy(entry.CredentialPolicy)
-	if normalizedPolicy == nil || normalizedPolicy.DeadCredential == nil || !normalizedPolicy.DeadCredential.Enabled || !strings.EqualFold(normalizedPolicy.DeadCredential.Action, "delete") {
-		log.WithFields(log.Fields{"provider": entry.Name, "base_url_ref": deadCredentialBaseURLRef(entry.BaseURL), "candidate_count": len(candidates)}).Info("dead credential removal skipped because policy is no longer enabled")
+	if normalizedPolicy == nil || normalizedPolicy.DeadCredential == nil || !normalizedPolicy.DeadCredential.Enabled || normalizedDeadCredentialAction(normalizedPolicy.DeadCredential.Action) != action {
+		log.WithFields(log.Fields{"provider": entry.Name, "base_url_ref": deadCredentialBaseURLRef(entry.BaseURL), "action": action, "candidate_count": len(candidates)}).Info("dead credential action skipped because policy is no longer enabled")
 		h.mu.Unlock()
 		return 0, "", nil
 	}
@@ -721,7 +768,11 @@ func (h *Handler) removeDeadCredentialBatch(ctx context.Context, providerKey str
 	validCandidates := candidates[:0]
 	for _, candidate := range candidates {
 		if candidate.policyFingerprint != currentFingerprint {
-			log.WithFields(log.Fields{"provider": entry.Name, "credential_ref": candidate.credentialRef}).Info("dead credential removal skipped because policy changed")
+			log.WithFields(log.Fields{"provider": entry.Name, "credential_ref": candidate.credentialRef, "action": action}).Info("dead credential action skipped because policy changed")
+			continue
+		}
+		if candidate.action != "" && normalizedDeadCredentialAction(candidate.action) != action {
+			log.WithFields(log.Fields{"provider": entry.Name, "credential_ref": candidate.credentialRef, "action": action}).Info("dead credential action skipped because candidate action changed")
 			continue
 		}
 		validCandidates = append(validCandidates, candidate)
@@ -731,7 +782,7 @@ func (h *Handler) removeDeadCredentialBatch(ctx context.Context, providerKey str
 		h.mu.Unlock()
 		return 0, "", nil
 	}
-	removeIndexes := make(map[int]struct{}, len(candidates))
+	changeIndexes := make(map[int]struct{}, len(candidates))
 	for _, candidate := range candidates {
 		matches := make([]int, 0, 1)
 		for index, configured := range entry.APIKeyEntries {
@@ -747,12 +798,16 @@ func (h *Handler) removeDeadCredentialBatch(ctx context.Context, providerKey str
 			matches = append(matches, index)
 		}
 		if len(matches) != 1 {
-			log.WithFields(log.Fields{"provider": entry.Name, "credential_ref": candidate.credentialRef, "match_count": len(matches)}).Warn("dead credential removal skipped because config identity is not unique")
+			log.WithFields(log.Fields{"provider": entry.Name, "credential_ref": candidate.credentialRef, "action": action, "match_count": len(matches)}).Warn("dead credential action skipped because config identity is not unique")
 			continue
 		}
-		removeIndexes[matches[0]] = struct{}{}
+		index := matches[0]
+		if action == "disable" && entry.APIKeyEntries[index].Disabled {
+			continue
+		}
+		changeIndexes[index] = struct{}{}
 	}
-	if len(removeIndexes) == 0 {
+	if len(changeIndexes) == 0 {
 		h.mu.Unlock()
 		return 0, "", nil
 	}
@@ -775,11 +830,16 @@ func (h *Handler) removeDeadCredentialBatch(ctx context.Context, providerKey str
 	summary["provider"] = entry.Name
 	summary["captured_at_utc"] = time.Now().UTC().Format(time.RFC3339Nano)
 	summary["before_count"] = len(entry.APIKeyEntries)
-	summary["removed_count"] = len(removeIndexes)
-	refs := make([]string, 0, len(removeIndexes))
+	summary["action"] = action
+	if action == "delete" {
+		summary["removed_count"] = len(changeIndexes)
+	} else {
+		summary["disabled_count"] = len(changeIndexes)
+	}
+	refs := make([]string, 0, len(changeIndexes))
 	for _, candidate := range candidates {
 		if index, ok := removeIndexesForCandidate(entry.APIKeyEntries, entry.BaseURL, candidate); ok {
-			if _, removed := removeIndexes[index]; !removed {
+			if _, changed := changeIndexes[index]; !changed {
 				continue
 			}
 			refs = append(refs, candidate.credentialRef)
@@ -787,25 +847,37 @@ func (h *Handler) removeDeadCredentialBatch(ctx context.Context, providerKey str
 	}
 	sort.Strings(refs)
 	summary["credential_refs"] = refs
-	if errWrite := writePrivateJSON(filepath.Join(backupDir, "removal-summary.json"), summary); errWrite != nil {
+	summaryName := "removal-summary.json"
+	if action == "disable" {
+		summaryName = "disable-summary.json"
+	}
+	if errWrite := writePrivateJSON(filepath.Join(backupDir, summaryName), summary); errWrite != nil {
 		h.mu.Unlock()
-		return 0, "", fmt.Errorf("write credential removal summary: %w", errWrite)
+		return 0, "", fmt.Errorf("write credential action summary: %w", errWrite)
 	}
 
 	oldEntries := entry.APIKeyEntries
-	updatedEntries := make([]config.OpenAICompatibilityAPIKey, 0, len(oldEntries)-len(removeIndexes))
-	for index, configured := range oldEntries {
-		if _, remove := removeIndexes[index]; remove {
-			continue
+	var updatedEntries []config.OpenAICompatibilityAPIKey
+	if action == "delete" {
+		updatedEntries = make([]config.OpenAICompatibilityAPIKey, 0, len(oldEntries)-len(changeIndexes))
+		for index, configured := range oldEntries {
+			if _, remove := changeIndexes[index]; remove {
+				continue
+			}
+			updatedEntries = append(updatedEntries, configured)
 		}
-		updatedEntries = append(updatedEntries, configured)
+	} else {
+		updatedEntries = append([]config.OpenAICompatibilityAPIKey(nil), oldEntries...)
+		for index := range changeIndexes {
+			updatedEntries[index].Disabled = true
+		}
 	}
 	entry.APIKeyEntries = updatedEntries
 	h.cfg.OpenAICompatibility[providerIndex] = entry
 	if errSave := config.SaveConfigPreserveComments(h.configFilePath, h.cfg); errSave != nil {
 		h.cfg.OpenAICompatibility[providerIndex].APIKeyEntries = oldEntries
 		h.mu.Unlock()
-		return 0, "", fmt.Errorf("save config after dead credential removal: %w", errSave)
+		return 0, "", fmt.Errorf("save config after dead credential action: %w", errSave)
 	}
 	snapshot := h.reloadSnapshotConfigLocked()
 	h.mu.Unlock()
@@ -813,7 +885,7 @@ func (h *Handler) removeDeadCredentialBatch(ctx context.Context, providerKey str
 	if snapshot.cfg != nil {
 		h.reloadConfigAfterManagementSaveAsync(ctx, snapshot)
 	}
-	return len(removeIndexes), backupDir, nil
+	return len(changeIndexes), backupDir, nil
 }
 
 func removeIndexesForCandidate(entries []config.OpenAICompatibilityAPIKey, providerBaseURL string, candidate deadCredentialCandidate) (int, bool) {

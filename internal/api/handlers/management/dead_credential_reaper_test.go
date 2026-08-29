@@ -152,6 +152,66 @@ func TestHandlerRemoveDeadCredentialBatchSkipsChangedPolicy(t *testing.T) {
 	}
 }
 
+func TestHandlerDisableDeadCredentialBatchKeepsCredentialAndOrder(t *testing.T) {
+	provider := util.OpenAICompatibleProviderKey("disable-test")
+	policy := config.NormalizeOpenAICompatibilityCredentialPolicy(&config.OpenAICompatibilityCredentialPolicy{
+		DeadCredential: &config.OpenAICompatibilityDeadCredentialPolicy{
+			Enabled:       true,
+			Statuses:      []int{http.StatusUnauthorized},
+			Confirmations: 2,
+			Action:        "disable",
+		},
+	})
+	cfg := &config.Config{
+		CredentialInFlight: config.DefaultCredentialInFlightConfig(),
+		OpenAICompatibility: []config.OpenAICompatibility{{
+			Name:             "disable-test",
+			BaseURL:          "https://upstream.example/v1",
+			CredentialPolicy: policy,
+			APIKeyEntries: []config.OpenAICompatibilityAPIKey{
+				{APIKey: "key-a", ProxyURL: "http://proxy-a"},
+				{APIKey: "key-b", ProxyURL: "http://proxy-b"},
+			},
+		}},
+	}
+	configPath := writeDeadCredentialTestConfig(t, cfg)
+	h := &Handler{cfg: cfg, configFilePath: configPath}
+	candidate := deadCredentialCandidate{
+		providerKey:       provider,
+		credentialRef:     "ref-a",
+		apiKey:            "key-a",
+		baseURL:           "https://upstream.example/v1",
+		proxyURL:          "http://proxy-a",
+		policyFingerprint: deadCredentialPolicyFingerprint(policy.DeadCredential),
+		action:            "disable",
+	}
+	disabled, backupDir, errDisable := h.disableDeadCredentialBatch(context.Background(), provider, []deadCredentialCandidate{candidate})
+	if errDisable != nil {
+		t.Fatalf("disableDeadCredentialBatch() error = %v", errDisable)
+	}
+	if disabled != 1 || backupDir == "" {
+		t.Fatalf("disabled = %d, backupDir = %q, want one disabled credential and backup", disabled, backupDir)
+	}
+	loaded, errLoad := config.LoadConfig(configPath)
+	if errLoad != nil {
+		t.Fatalf("LoadConfig() error = %v", errLoad)
+	}
+	entries := loaded.OpenAICompatibility[0].APIKeyEntries
+	if len(entries) != 2 || !entries[0].Disabled || entries[1].Disabled {
+		t.Fatalf("entries after disable = %+v", entries)
+	}
+	if entries[0].APIKey != "key-a" || entries[0].ProxyURL != "http://proxy-a" || entries[1].APIKey != "key-b" {
+		t.Fatalf("credential order/identity changed: %+v", entries)
+	}
+	summary, errRead := os.ReadFile(filepath.Join(backupDir, "disable-summary.json"))
+	if errRead != nil {
+		t.Fatalf("read disable summary: %v", errRead)
+	}
+	if strings.Contains(string(summary), "key-a") || !strings.Contains(string(summary), "ref-a") {
+		t.Fatalf("disable summary leaked or omitted credential reference: %s", summary)
+	}
+}
+
 func TestDeadCredentialGroupSeparatesProviderEndpoints(t *testing.T) {
 	left := deadCredentialCandidate{providerKey: "provider", baseURL: "https://one.example/v1"}
 	right := deadCredentialCandidate{providerKey: "provider", baseURL: "https://two.example/v1"}
@@ -240,6 +300,67 @@ func TestDeadCredentialReaperDeletesAfterConfirmations(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatalf("dead credential was not removed within confirmation window; last_count=%d last_error=%s", lastCount, lastErr)
+}
+
+func TestDeadCredentialReaperDisablesAfterConfirmations(t *testing.T) {
+	provider := util.OpenAICompatibleProviderKey("disable-test")
+	policy := &config.OpenAICompatibilityCredentialPolicy{
+		DeadCredential: &config.OpenAICompatibilityDeadCredentialPolicy{
+			Enabled:       true,
+			Statuses:      []int{http.StatusUnauthorized},
+			Confirmations: 2,
+			WindowSeconds: 60,
+			Action:        "disable",
+		},
+	}
+	cfg := &config.Config{
+		CredentialInFlight: config.DefaultCredentialInFlightConfig(),
+		OpenAICompatibility: []config.OpenAICompatibility{{
+			Name:             "disable-test",
+			BaseURL:          "https://upstream.example/v1",
+			CredentialPolicy: config.NormalizeOpenAICompatibilityCredentialPolicy(policy),
+			APIKeyEntries:    []config.OpenAICompatibilityAPIKey{{APIKey: "key-a"}, {APIKey: "key-b"}},
+		}},
+	}
+	configPath := writeDeadCredentialTestConfig(t, cfg)
+	manager := coreauth.NewManager(nil, nil, nil)
+	auth := &coreauth.Auth{
+		ID:       "disable-test-auth",
+		Provider: provider,
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"api_key":      "key-a",
+			"base_url":     "https://upstream.example/v1",
+			"compat_name":  "disable-test",
+			"provider_key": provider,
+			"source":       "config:disable-test[test]",
+		},
+	}
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("Register() error = %v", errRegister)
+	}
+	h := NewHandler(cfg, configPath, manager)
+	defer h.Close()
+	failure := coreauth.Result{
+		AuthID:   auth.ID,
+		Provider: provider,
+		Model:    "test-model",
+		Error:    &coreauth.Error{HTTPStatus: http.StatusUnauthorized, Message: "authentication failed"},
+	}
+	manager.MarkResult(logging.WithRequestID(context.Background(), "disable-request-1"), failure)
+	manager.MarkResult(logging.WithRequestID(context.Background(), "disable-request-2"), failure)
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		loaded, errLoad := config.LoadConfig(configPath)
+		if errLoad == nil && len(loaded.OpenAICompatibility) == 1 && len(loaded.OpenAICompatibility[0].APIKeyEntries) == 2 && loaded.OpenAICompatibility[0].APIKeyEntries[0].Disabled {
+			if loaded.OpenAICompatibility[0].APIKeyEntries[1].Disabled {
+				t.Fatal("disable action affected a healthy credential")
+			}
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("dead credential was not disabled within confirmation window")
 }
 
 func TestDeadCredentialReaperCancelsQueuedRemovalAfterSuccess(t *testing.T) {

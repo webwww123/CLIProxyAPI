@@ -11,6 +11,43 @@ import (
 
 const configAPIKeyDisablePattern = "*"
 
+// toggleConfigAPIKeyDisabled updates the explicit per-credential disabled flag
+// for an OpenAI-compatible API-key entry. It resolves the entry by the stable
+// runtime auth ID, so callers never need to send the credential material back
+// through the management API.
+func toggleConfigAPIKeyDisabled(cfg *config.Config, auth *coreauth.Auth, disable bool) (bool, error) {
+	if cfg == nil || auth == nil || !coreauth.IsConfigAPIKeyAuth(auth) {
+		return false, nil
+	}
+	authID := strings.TrimSpace(auth.ID)
+	if authID == "" {
+		return false, fmt.Errorf("auth id is empty")
+	}
+
+	idGen := synthesizer.NewStableIDGenerator()
+	for i := range cfg.OpenAICompatibility {
+		entry := &cfg.OpenAICompatibility[i]
+		if entry.Disabled {
+			continue
+		}
+		providerName := strings.ToLower(strings.TrimSpace(entry.Name))
+		if providerName == "" {
+			providerName = "openai-compatibility"
+		}
+		idKind := fmt.Sprintf("openai-compatibility:%s", providerName)
+		for j := range entry.APIKeyEntries {
+			apiKeyEntry := &entry.APIKeyEntries[j]
+			id, _ := idGen.Next(idKind, strings.TrimSpace(apiKeyEntry.APIKey), strings.TrimSpace(entry.BaseURL), strings.TrimSpace(apiKeyEntry.ProxyURL))
+			if id != authID {
+				continue
+			}
+			apiKeyEntry.Disabled = disable
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func setConfigAPIKeyExcludedAll(models []string, disable bool) []string {
 	if disable {
 		for _, item := range models {

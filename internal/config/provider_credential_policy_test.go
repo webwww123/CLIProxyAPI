@@ -39,6 +39,7 @@ openai-compatibility:
         max-deletions-per-hour: 7
     api-key-entries:
       - api-key: test-key
+        disabled: true
     models:
       - name: mistral-small-latest
         alias: test-model
@@ -50,6 +51,9 @@ openai-compatibility:
 		t.Fatalf("openai-compatibility count = %d, want 1", len(cfg.OpenAICompatibility))
 	}
 	entry := cfg.OpenAICompatibility[0]
+	if len(entry.APIKeyEntries) != 1 || !entry.APIKeyEntries[0].Disabled {
+		t.Fatalf("api-key entry disabled = %#v, want true", entry.APIKeyEntries)
+	}
 	if entry.MaxRetryCredentials == nil || *entry.MaxRetryCredentials != 4 {
 		t.Fatalf("max-retry-credentials = %v, want 4", entry.MaxRetryCredentials)
 	}
@@ -152,5 +156,12 @@ func TestNormalizeOpenAICompatibilityCredentialPolicyDefaultsAndDisable(t *testi
 	})
 	if disabled == nil || disabled.DeadCredential == nil || disabled.DeadCredential.Action != "disabled" {
 		t.Fatalf("disabled dead credential policy = %+v", disabled)
+	}
+
+	keyDisable := NormalizeOpenAICompatibilityCredentialPolicy(&OpenAICompatibilityCredentialPolicy{
+		DeadCredential: &OpenAICompatibilityDeadCredentialPolicy{Enabled: true, Action: "quarantine"},
+	})
+	if keyDisable == nil || keyDisable.DeadCredential == nil || keyDisable.DeadCredential.Action != "disable" {
+		t.Fatalf("key-disable dead credential policy = %+v", keyDisable)
 	}
 }

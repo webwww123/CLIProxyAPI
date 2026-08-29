@@ -51,6 +51,23 @@ func TestDiffOpenAICompatibilityPromptCacheKey(t *testing.T) {
 	expectContains(t, changes, "provider updated: provider-a (support-prompt-cache-key false -> true)")
 }
 
+func TestDiffOpenAICompatibilityCredentialDisabledCount(t *testing.T) {
+	oldList := []config.OpenAICompatibility{{
+		Name:          "provider-a",
+		APIKeyEntries: []config.OpenAICompatibilityAPIKey{{APIKey: "key-a"}, {APIKey: "key-b"}},
+	}}
+	newList := []config.OpenAICompatibility{{
+		Name: "provider-a",
+		APIKeyEntries: []config.OpenAICompatibilityAPIKey{
+			{APIKey: "key-a", Disabled: true},
+			{APIKey: "key-b"},
+		},
+	}}
+
+	changes := DiffOpenAICompatibility(oldList, newList)
+	expectContains(t, changes, "provider updated: provider-a (disabled-api-keys 0 -> 1)")
+}
+
 func TestDiffOpenAICompatibilityCredentialPolicy(t *testing.T) {
 	oldMax := 1
 	newMax := 4
