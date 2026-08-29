@@ -102,6 +102,7 @@ type WatcherWrapper struct {
 	stop  func() error
 
 	setConfig             func(cfg *config.Config)
+	setCredentialReload   func(callback func(*config.Config) bool)
 	snapshotAuths         func() []*coreauth.Auth
 	setUpdateQueue        func(queue chan<- watcher.AuthUpdate)
 	dispatchRuntimeUpdate func(update watcher.AuthUpdate) bool
@@ -132,6 +133,15 @@ func (w *WatcherWrapper) SetConfig(cfg *config.Config) {
 		return
 	}
 	w.setConfig(cfg)
+}
+
+// SetCredentialReloadCallback configures the narrow config-backed credential
+// reload path when the underlying watcher supports it.
+func (w *WatcherWrapper) SetCredentialReloadCallback(callback func(*config.Config) bool) {
+	if w == nil || w.setCredentialReload == nil {
+		return
+	}
+	w.setCredentialReload(callback)
 }
 
 // ReloadConfigIfChanged asks the underlying watcher to reload config from disk.

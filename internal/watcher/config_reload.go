@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"os"
 	"reflect"
+	"strings"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -132,6 +133,17 @@ func (w *Watcher) reloadConfig() bool {
 		} else {
 			log.Debugf("no material config field changes detected")
 		}
+	}
+
+	if plan, credentialOnly := buildOpenAICompatCredentialReloadPlan(oldConfig, newConfig); credentialOnly {
+		log.WithFields(log.Fields{
+			"providers":      strings.Join(plan.providerNames, ","),
+			"provider_count": len(plan.providerIndexes),
+		}).Info("OpenAI-compatible credential-only config change detected")
+		if w.reloadOpenAICompatCredentials(plan) {
+			return true
+		}
+		log.Warn("provider-scoped credential reload unavailable; falling back to full client reload")
 	}
 
 	authDirChanged := oldConfig == nil || oldConfig.AuthDir != newConfig.AuthDir

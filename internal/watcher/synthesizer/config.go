@@ -60,6 +60,40 @@ func (s *ConfigSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth,
 	return out, nil
 }
 
+// SynthesizeOpenAICompatIndexes generates config-backed auth entries only for
+// the selected OpenAI-compatible provider indexes. Provider indexes are kept
+// unchanged so model and policy lookups retain the same config identity.
+func (s *ConfigSynthesizer) SynthesizeOpenAICompatIndexes(ctx *SynthesisContext, indexes []int) ([]*coreauth.Auth, error) {
+	if ctx == nil || ctx.Config == nil || len(indexes) == 0 {
+		return nil, nil
+	}
+	if errValidate := ctx.Config.ValidateCredentialWeights(); errValidate != nil {
+		return nil, fmt.Errorf("synthesize OpenAI-compatible config API key auths: %w", errValidate)
+	}
+
+	selected := make(map[int]struct{}, len(indexes))
+	for _, index := range indexes {
+		if index < 0 || index >= len(ctx.Config.OpenAICompatibility) {
+			continue
+		}
+		selected[index] = struct{}{}
+	}
+	if len(selected) == 0 {
+		return nil, nil
+	}
+
+	cfg := *ctx.Config
+	cfg.OpenAICompatibility = append([]config.OpenAICompatibility(nil), ctx.Config.OpenAICompatibility...)
+	for index := range cfg.OpenAICompatibility {
+		if _, ok := selected[index]; !ok {
+			cfg.OpenAICompatibility[index].Disabled = true
+		}
+	}
+	scoped := *ctx
+	scoped.Config = &cfg
+	return s.synthesizeOpenAICompat(&scoped), nil
+}
+
 // synthesizeGeminiKeys creates Auth entries for Gemini API keys.
 func (s *ConfigSynthesizer) synthesizeGeminiKeys(ctx *SynthesisContext) []*coreauth.Auth {
 	return s.synthesizeGeminiKeyEntries(ctx, ctx.Config.GeminiKey, "gemini:apikey", "gemini", "gemini-apikey", constant.Gemini)

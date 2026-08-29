@@ -181,6 +181,9 @@ func (s *Service) Run(ctx context.Context) error {
 			return fmt.Errorf("cliproxy: failed to create watcher: %w", errCreate)
 		}
 		s.watcher = watcherWrapper
+		watcherWrapper.SetCredentialReloadCallback(func(newCfg *config.Config) bool {
+			return s.applyWatcherCredentialConfigUpdate(newCfg)
+		})
 		s.ensureAuthUpdateQueue(ctx)
 		if s.authUpdates != nil {
 			watcherWrapper.SetAuthUpdateQueue(s.authUpdates)

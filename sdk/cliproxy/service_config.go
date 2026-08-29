@@ -19,6 +19,14 @@ func (s *Service) applyWatcherConfigUpdate(newCfg *config.Config) {
 	s.applyConfigUpdateWithAuthSynthesis(context.Background(), newCfg, false)
 }
 
+func (s *Service) applyWatcherCredentialConfigUpdate(newCfg *config.Config) bool {
+	commit := s.commitConfigUpdate(newCfg)
+	if commit.cfg == nil {
+		return false
+	}
+	return s.applyCredentialConfigRuntime(context.Background(), commit)
+}
+
 type configCommit struct {
 	cfg      *config.Config
 	sequence uint64
@@ -210,6 +218,35 @@ func (s *Service) applyConfigRuntime(ctx context.Context, commit configCommit, s
 	return true
 }
 
+func (s *Service) applyCredentialConfigRuntime(ctx context.Context, commit configCommit) bool {
+	if s == nil || commit.cfg == nil {
+		return false
+	}
+	reloadStarted := time.Now()
+	s.configRuntimeMu.Lock()
+	defer s.configRuntimeMu.Unlock()
+	if !s.configCommitCurrent(commit) {
+		return false
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if errContext := ctx.Err(); errContext != nil {
+		return false
+	}
+	// The watcher admits this path only when APIKeyEntries changed. The emitted
+	// auth updates carry key, proxy, weight, and disabled state; manager policy,
+	// routing, models, plugins, and retry settings therefore stay valid.
+	if !s.updateServerCredentialConfigContext(ctx, commit.cfg) {
+		return false
+	}
+	log.WithFields(log.Fields{
+		"config_sequence":                   commit.sequence,
+		"credential_reload_duration_millis": time.Since(reloadStarted).Milliseconds(),
+	}).Info("credential-only config runtime reload completed")
+	return true
+}
+
 func (s *Service) applyManagerConfig(ctx context.Context, commit configCommit) bool {
 	if s == nil || s.coreManager == nil || commit.cfg == nil {
 		return s != nil && commit.cfg != nil
@@ -245,6 +282,19 @@ func (s *Service) updateServerClientsContext(ctx context.Context, cfg *config.Co
 		return true
 	}
 	return s.server.UpdateClientsContext(ctx, cfg)
+}
+
+func (s *Service) updateServerCredentialConfigContext(ctx context.Context, cfg *config.Config) bool {
+	if s == nil || cfg == nil || (ctx != nil && ctx.Err() != nil) {
+		return false
+	}
+	if s.updateServerCredentialConfigContextFn != nil {
+		return s.updateServerCredentialConfigContextFn(ctx, cfg)
+	}
+	if s.server == nil {
+		return true
+	}
+	return s.server.UpdateCredentialEntriesContext(ctx, cfg)
 }
 
 func (s *Service) reloadConfigFromWatcher() bool {

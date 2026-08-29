@@ -44,6 +44,7 @@ type Watcher struct {
 	serverUpdatePend  bool
 	stopped           atomic.Bool
 	reloadCallback    func(*config.Config)
+	credentialReload  func(*config.Config) bool
 	watcher           *fsnotify.Watcher
 	lastAuthHashes    map[string]string
 	lastAuthContents  map[string]*coreauth.Auth
@@ -139,6 +140,14 @@ func (w *Watcher) SetConfig(cfg *config.Config) {
 	defer w.clientsMutex.Unlock()
 	w.config = cfg
 	w.oldConfigYaml, _ = yaml.Marshal(cfg)
+}
+
+// SetCredentialReloadCallback installs the narrow runtime callback used when a
+// config change is limited to OpenAI-compatible API key entries.
+func (w *Watcher) SetCredentialReloadCallback(callback func(*config.Config) bool) {
+	w.clientsMutex.Lock()
+	w.credentialReload = callback
+	w.clientsMutex.Unlock()
 }
 
 // SetPluginAuthParser updates the plugin auth parser used for file auth synthesis.

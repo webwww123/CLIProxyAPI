@@ -234,6 +234,31 @@ func (s *Server) UpdateClientsContext(ctx context.Context, cfg *config.Config) b
 	return ctx.Err() == nil
 }
 
+// UpdateCredentialEntriesContext updates config references after a change that
+// is strictly limited to OpenAI-compatible API key entries. Runtime components
+// derived from all other config fields remain unchanged.
+func (s *Server) UpdateCredentialEntriesContext(ctx context.Context, cfg *config.Config) bool {
+	if s == nil || cfg == nil {
+		return false
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if errContext := ctx.Err(); errContext != nil {
+		return false
+	}
+
+	s.cfg = cfg
+	managementasset.SetCurrentConfig(cfg)
+	if s.handlers != nil {
+		s.handlers.UpdateClients(effectiveSDKConfig(cfg))
+	}
+	if s.mgmt != nil {
+		s.mgmt.SetConfig(cfg)
+	}
+	return ctx.Err() == nil
+}
+
 func (s *Server) SetWebsocketAuthChangeHandler(fn func(bool, bool)) {
 	if s == nil {
 		return
