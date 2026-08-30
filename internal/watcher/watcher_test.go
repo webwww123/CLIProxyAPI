@@ -229,6 +229,93 @@ func TestReloadConfigIfChanged_TriggersOnChangeAndSkipsUnchanged(t *testing.T) {
 	}
 }
 
+func TestReloadConfigIfChangedSerializesConcurrentReloads(t *testing.T) {
+	tmpDir := t.TempDir()
+	authDir := filepath.Join(tmpDir, "auth")
+	if err := os.MkdirAll(authDir, 0o755); err != nil {
+		t.Fatalf("failed to create auth dir: %v", err)
+	}
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	newCfg := &config.Config{
+		Port:               9090,
+		AuthDir:            authDir,
+		CredentialInFlight: config.DefaultCredentialInFlightConfig(),
+	}
+	data, errMarshal := yaml.Marshal(newCfg)
+	if errMarshal != nil {
+		t.Fatalf("failed to marshal config: %v", errMarshal)
+	}
+	if errWrite := os.WriteFile(configPath, data, 0o600); errWrite != nil {
+		t.Fatalf("failed to write config: %v", errWrite)
+	}
+
+	var reloads int32
+	firstEntered := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() {
+		releaseOnce.Do(func() { close(releaseFirst) })
+	}
+	t.Cleanup(release)
+	w := &Watcher{
+		configPath: configPath,
+		authDir:    authDir,
+		reloadCallback: func(*config.Config) {
+			if atomic.AddInt32(&reloads, 1) == 1 {
+				close(firstEntered)
+				<-releaseFirst
+			}
+		},
+	}
+	w.SetConfig(&config.Config{
+		Port:               8080,
+		AuthDir:            authDir,
+		CredentialInFlight: config.DefaultCredentialInFlightConfig(),
+	})
+
+	firstDone := make(chan struct{})
+	go func() {
+		w.reloadConfigIfChanged()
+		close(firstDone)
+	}()
+	select {
+	case <-firstEntered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for first reload")
+	}
+
+	secondDone := make(chan struct{})
+	go func() {
+		w.reloadConfigIfChanged()
+		close(secondDone)
+	}()
+	secondReturnedEarly := false
+	select {
+	case <-secondDone:
+		secondReturnedEarly = true
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	release()
+	select {
+	case <-firstDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for first reload completion")
+	}
+	select {
+	case <-secondDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for second reload completion")
+	}
+
+	if secondReturnedEarly {
+		t.Fatal("second reload completed while the first reload was still running")
+	}
+	if got := atomic.LoadInt32(&reloads); got != 1 {
+		t.Fatalf("reload callback count = %d, want 1", got)
+	}
+}
+
 func TestStartAndStopSuccess(t *testing.T) {
 	tmpDir := t.TempDir()
 	authDir := filepath.Join(tmpDir, "auth")
@@ -678,7 +765,6 @@ func TestReloadClientsLogsConfigDiffs(t *testing.T) {
 		config:  oldCfg,
 	}
 	w.SetConfig(oldCfg)
-	w.oldConfigYaml, _ = yaml.Marshal(oldCfg)
 
 	w.clientsMutex.Lock()
 	w.config = newCfg

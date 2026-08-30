@@ -11,6 +11,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/synthesizer"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
+	"gopkg.in/yaml.v3"
 )
 
 type openAICompatCredentialReloadPlan struct {
@@ -39,7 +40,7 @@ func buildOpenAICompatCredentialReloadPlan(oldCfg, newCfg *config.Config) (openA
 	for index := range oldProviders {
 		oldEntries := oldProviders[index].APIKeyEntries
 		newEntries := newProviders[index].APIKeyEntries
-		if !reflect.DeepEqual(oldEntries, newEntries) {
+		if !configRuntimeSemanticallyEqual(oldEntries, newEntries) {
 			plan.providerIndexes = append(plan.providerIndexes, index)
 			name := strings.TrimSpace(newProviders[index].Name)
 			if name == "" {
@@ -58,10 +59,104 @@ func buildOpenAICompatCredentialReloadPlan(oldCfg, newCfg *config.Config) (openA
 
 	oldComparable.OpenAICompatibility = oldProviders
 	newComparable.OpenAICompatibility = newProviders
-	if !reflect.DeepEqual(&oldComparable, &newComparable) {
+	if !configRuntimeSemanticallyEqual(&oldComparable, &newComparable) {
 		return openAICompatCredentialReloadPlan{}, false
 	}
 	return plan, true
+}
+
+var yamlNodeTypeForRuntimeComparison = reflect.TypeOf(yaml.Node{})
+
+// configRuntimeSemanticallyEqual compares effective runtime configuration values.
+// Parser bookkeeping, YAML formatting metadata, and nil-versus-empty collections
+// do not change runtime behavior and must not force a full credential reload.
+func configRuntimeSemanticallyEqual(left, right any) bool {
+	return configRuntimeValuesEqual(reflect.ValueOf(left), reflect.ValueOf(right))
+}
+
+func configRuntimeValuesEqual(left, right reflect.Value) bool {
+	if !left.IsValid() || !right.IsValid() {
+		return left.IsValid() == right.IsValid()
+	}
+	if left.Type() != right.Type() {
+		return false
+	}
+	if left.Type() == yamlNodeTypeForRuntimeComparison {
+		leftNode := left.Interface().(yaml.Node)
+		rightNode := right.Interface().(yaml.Node)
+		return yamlNodeRuntimeEqual(&leftNode, &rightNode, make(map[yamlNodePair]struct{}))
+	}
+
+	switch left.Kind() {
+	case reflect.Interface, reflect.Pointer:
+		if left.IsNil() || right.IsNil() {
+			return left.IsNil() == right.IsNil()
+		}
+		return configRuntimeValuesEqual(left.Elem(), right.Elem())
+	case reflect.Struct:
+		structType := left.Type()
+		for index := 0; index < left.NumField(); index++ {
+			// Unexported fields are parser/runtime bookkeeping rather than config values.
+			if structType.Field(index).PkgPath != "" {
+				continue
+			}
+			if !configRuntimeValuesEqual(left.Field(index), right.Field(index)) {
+				return false
+			}
+		}
+		return true
+	case reflect.Slice, reflect.Array:
+		if left.Len() != right.Len() {
+			return false
+		}
+		for index := 0; index < left.Len(); index++ {
+			if !configRuntimeValuesEqual(left.Index(index), right.Index(index)) {
+				return false
+			}
+		}
+		return true
+	case reflect.Map:
+		if left.Len() != right.Len() {
+			return false
+		}
+		iterator := left.MapRange()
+		for iterator.Next() {
+			rightValue := right.MapIndex(iterator.Key())
+			if !rightValue.IsValid() || !configRuntimeValuesEqual(iterator.Value(), rightValue) {
+				return false
+			}
+		}
+		return true
+	case reflect.Func, reflect.Chan:
+		return left.IsNil() && right.IsNil()
+	default:
+		return reflect.DeepEqual(left.Interface(), right.Interface())
+	}
+}
+
+type yamlNodePair struct {
+	left  *yaml.Node
+	right *yaml.Node
+}
+
+func yamlNodeRuntimeEqual(left, right *yaml.Node, visited map[yamlNodePair]struct{}) bool {
+	if left == nil || right == nil {
+		return left == right
+	}
+	pair := yamlNodePair{left: left, right: right}
+	if _, seen := visited[pair]; seen {
+		return true
+	}
+	visited[pair] = struct{}{}
+	if left.Kind != right.Kind || left.Tag != right.Tag || left.Value != right.Value || len(left.Content) != len(right.Content) {
+		return false
+	}
+	for index := range left.Content {
+		if !yamlNodeRuntimeEqual(left.Content[index], right.Content[index], visited) {
+			return false
+		}
+	}
+	return yamlNodeRuntimeEqual(left.Alias, right.Alias, visited)
 }
 
 func (w *Watcher) reloadOpenAICompatCredentials(plan openAICompatCredentialReloadPlan) bool {

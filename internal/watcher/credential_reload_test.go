@@ -20,6 +20,20 @@ var (
 
 func TestBuildOpenAICompatCredentialReloadPlan(t *testing.T) {
 	base := credentialReloadTestConfig()
+	pluginEnabled := true
+	base.Plugins.Configs = map[string]config.PluginInstanceConfig{
+		"sample": {
+			Enabled: &pluginEnabled,
+			Raw: yaml.Node{
+				Kind: yaml.MappingNode,
+				Tag:  "!!map",
+				Content: []*yaml.Node{
+					{Kind: yaml.ScalarNode, Tag: "!!str", Value: "mode", Line: 1, Column: 1},
+					{Kind: yaml.ScalarNode, Tag: "!!str", Value: "stable", Line: 1, Column: 7},
+				},
+			},
+		},
+	}
 	tests := []struct {
 		name        string
 		mutate      func(*config.Config)
@@ -38,6 +52,30 @@ func TestBuildOpenAICompatCredentialReloadPlan(t *testing.T) {
 			name: "disabled only",
 			mutate: func(cfg *config.Config) {
 				cfg.OpenAICompatibility[0].APIKeyEntries[0].Disabled = true
+			},
+			wantNarrow:  true,
+			wantIndexes: []int{0},
+		},
+		{
+			name: "disabled with nil and empty collection representation",
+			mutate: func(cfg *config.Config) {
+				cfg.OpenAICompatibility[0].APIKeyEntries[0].Disabled = true
+				cfg.Payload.Default = []config.PayloadRule{}
+				cfg.Codex.LiveMediaRelay.ICEServers = []config.CodexLiveICEServer{}
+			},
+			wantNarrow:  true,
+			wantIndexes: []int{0},
+		},
+		{
+			name: "disabled with yaml metadata only",
+			mutate: func(cfg *config.Config) {
+				cfg.OpenAICompatibility[0].APIKeyEntries[0].Disabled = true
+				plugin := cfg.Plugins.Configs["sample"]
+				plugin.Raw.Line = 99
+				plugin.Raw.Column = 12
+				plugin.Raw.HeadComment = "rewritten comment"
+				plugin.Raw.Content[0].Line = 100
+				cfg.Plugins.Configs["sample"] = plugin
 			},
 			wantNarrow:  true,
 			wantIndexes: []int{0},
@@ -70,9 +108,25 @@ func TestBuildOpenAICompatCredentialReloadPlan(t *testing.T) {
 			},
 		},
 		{
+			name: "plugin runtime value",
+			mutate: func(cfg *config.Config) {
+				cfg.OpenAICompatibility[0].APIKeyEntries[0].Disabled = true
+				plugin := cfg.Plugins.Configs["sample"]
+				plugin.Raw.Content[1].Value = "changed"
+				cfg.Plugins.Configs["sample"] = plugin
+			},
+		},
+		{
 			name: "global retry",
 			mutate: func(cfg *config.Config) {
 				cfg.RequestRetry++
+			},
+		},
+		{
+			name: "credential concurrency runtime value",
+			mutate: func(cfg *config.Config) {
+				cfg.OpenAICompatibility[0].APIKeyEntries[0].Disabled = true
+				cfg.CredentialConcurrency.MaxLimit++
 			},
 		},
 		{
@@ -174,6 +228,75 @@ func TestReloadConfigUsesProviderScopedCredentialPath(t *testing.T) {
 	}
 	if providerBCount != 1 {
 		t.Fatalf("provider-b auth count = %d, want 1", providerBCount)
+	}
+}
+
+func TestReloadConfigUsesProviderScopedCredentialPathAfterManagementSave(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	rawConfig := fmt.Sprintf(`port: 8317
+auth-dir: %q
+openai-compatibility:
+  - name: provider-a
+    base-url: https://a.example.com/v1
+    models:
+      - name: model-a
+        alias: model-a
+    api-key-entries:
+      - api-key: test-key-a
+    credential-policy:
+      scope-statuses: [401]
+      dead-credential:
+        enabled: true
+        action: disable
+`, tmpDir)
+	if errWrite := os.WriteFile(configPath, []byte(rawConfig), 0o600); errWrite != nil {
+		t.Fatalf("write initial config: %v", errWrite)
+	}
+	loadedOld, errLoadOld := config.LoadConfig(configPath)
+	if errLoadOld != nil {
+		t.Fatalf("load old config: %v", errLoadOld)
+	}
+
+	initialAuths := synthesizeOpenAICompatCredentials(t, loadedOld, []int{0})
+	currentAuths := make(map[string]*coreauth.Auth, len(initialAuths))
+	for _, auth := range initialAuths {
+		currentAuths[auth.ID] = auth.Clone()
+	}
+
+	fullCalls := 0
+	narrowCalls := 0
+	queue := make(chan AuthUpdate, 4)
+	w := &Watcher{
+		configPath:     configPath,
+		authDir:        tmpDir,
+		currentAuths:   currentAuths,
+		lastAuthHashes: make(map[string]string),
+		reloadCallback: func(*config.Config) { fullCalls++ },
+	}
+	w.SetCredentialReloadCallback(func(*config.Config) bool {
+		narrowCalls++
+		return true
+	})
+	w.SetAuthUpdateQueue(queue)
+	t.Cleanup(w.stopDispatch)
+	w.SetConfig(loadedOld)
+
+	// Management mutates the shared runtime config before preserving the YAML file.
+	loadedOld.OpenAICompatibility[0].APIKeyEntries[0].Disabled = true
+	if errSave := config.SaveConfigPreserveComments(configPath, loadedOld); errSave != nil {
+		t.Fatalf("save management config: %v", errSave)
+	}
+	if ok := w.reloadConfig(); !ok {
+		t.Fatal("reloadConfig failed")
+	}
+	if narrowCalls != 1 || fullCalls != 0 {
+		t.Fatalf("callback calls = narrow:%d full:%d, want 1/0", narrowCalls, fullCalls)
+	}
+
+	updates := receiveAuthUpdates(t, queue, 1)
+	if updates[0].Action != AuthUpdateActionModify || updates[0].Auth == nil || !updates[0].Auth.Disabled {
+		t.Fatalf("update = %+v, want one disabled credential modification", updates[0])
 	}
 }
 

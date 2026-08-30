@@ -12,7 +12,6 @@ import (
 	"github.com/fsnotify/fsnotify"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/synthesizer"
-	"gopkg.in/yaml.v3"
 
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -31,38 +30,39 @@ type authDirProvider interface {
 
 // Watcher manages file watching for configuration and authentication files
 type Watcher struct {
-	configPath        string
-	authDir           string
-	config            *config.Config
-	clientsMutex      sync.RWMutex
-	authRescanMu      sync.Mutex
-	configReloadMu    sync.Mutex
-	configReloadTimer *time.Timer
-	serverUpdateMu    sync.Mutex
-	serverUpdateTimer *time.Timer
-	serverUpdateLast  time.Time
-	serverUpdatePend  bool
-	stopped           atomic.Bool
-	reloadCallback    func(*config.Config)
-	credentialReload  func(*config.Config) bool
-	watcher           *fsnotify.Watcher
-	lastAuthHashes    map[string]string
-	lastAuthContents  map[string]*coreauth.Auth
-	fileAuthsByPath   map[string]map[string]*coreauth.Auth
-	lastRemoveTimes   map[string]time.Time
-	lastConfigHash    string
-	authQueue         chan<- AuthUpdate
-	currentAuths      map[string]*coreauth.Auth
-	runtimeAuths      map[string]*coreauth.Auth
-	dispatchMu        sync.Mutex
-	dispatchCond      *sync.Cond
-	pendingUpdates    map[string]AuthUpdate
-	pendingOrder      []string
-	dispatchCancel    context.CancelFunc
-	storePersister    storePersister
-	pluginAuthParser  synthesizer.PluginAuthParser
-	mirroredAuthDir   string
-	oldConfigYaml     []byte
+	configPath         string
+	authDir            string
+	config             *config.Config
+	clientsMutex       sync.RWMutex
+	authRescanMu       sync.Mutex
+	configReloadMu     sync.Mutex
+	configReloadExecMu sync.Mutex
+	configReloadTimer  *time.Timer
+	serverUpdateMu     sync.Mutex
+	serverUpdateTimer  *time.Timer
+	serverUpdateLast   time.Time
+	serverUpdatePend   bool
+	stopped            atomic.Bool
+	reloadCallback     func(*config.Config)
+	credentialReload   func(*config.Config) bool
+	watcher            *fsnotify.Watcher
+	lastAuthHashes     map[string]string
+	lastAuthContents   map[string]*coreauth.Auth
+	fileAuthsByPath    map[string]map[string]*coreauth.Auth
+	lastRemoveTimes    map[string]time.Time
+	lastConfigHash     string
+	authQueue          chan<- AuthUpdate
+	currentAuths       map[string]*coreauth.Auth
+	runtimeAuths       map[string]*coreauth.Auth
+	dispatchMu         sync.Mutex
+	dispatchCond       *sync.Cond
+	pendingUpdates     map[string]AuthUpdate
+	pendingOrder       []string
+	dispatchCancel     context.CancelFunc
+	storePersister     storePersister
+	pluginAuthParser   synthesizer.PluginAuthParser
+	mirroredAuthDir    string
+	oldConfigSnapshot  *config.Config
 }
 
 // AuthUpdateAction represents the type of change detected in auth sources.
@@ -139,7 +139,7 @@ func (w *Watcher) SetConfig(cfg *config.Config) {
 	w.clientsMutex.Lock()
 	defer w.clientsMutex.Unlock()
 	w.config = cfg
-	w.oldConfigYaml, _ = yaml.Marshal(cfg)
+	w.oldConfigSnapshot = cfg.CloneForRuntime()
 }
 
 // SetCredentialReloadCallback installs the narrow runtime callback used when a
