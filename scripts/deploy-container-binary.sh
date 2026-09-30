@@ -28,12 +28,23 @@ done
 [[ "$mode" == --dry-run || "$mode" == --apply ]]
 exec 9>"/run/lock/cpa-binary-upgrade-${container}.lock"
 flock -n 9 || { echo "Another upgrade holds the lock" >&2; exit 1; }
+restart_help="$(docker restart --help)"
+if [[ "$restart_help" == *"--time int"* ]]; then
+  restart_wait_flag=--time
+elif [[ "$restart_help" == *"--timeout"* ]]; then
+  restart_wait_flag=--timeout
+else
+  echo "Docker has no supported restart wait option" >&2
+  exit 2
+fi
+restart_container() { docker restart "$restart_wait_flag" 45 "$container" >/dev/null; }
 
 container_sha() { docker exec "$container" sha256sum "$1" | awk '{print $1}'; }
 check_identity() {
   [[ "$(docker inspect --format '{{.Id}}' "$container")" == "$container_id" ]]
   [[ "$(docker inspect --format '{{.State.Running}}' "$container")" == true ]]
   [[ "$(container_sha "$binary_path")" == "$old_sha" ]]
+  [[ "$(container_sha /proc/1/exe)" == "$old_sha" ]]
   [[ "$(container_sha "$config_path")" == "$config_sha" ]]
 }
 check_health() { curl --silent --show-error --fail --max-time 3 "$health_url" >/dev/null; }
@@ -70,7 +81,7 @@ on_failure() {
     echo "Upgrade verification failed; restoring the exact previous binary." >&2
     if docker cp "$backup_dir/previous-binary" "$container:${binary_path}.rollback-pending" &&
        docker exec "$container" sh -c 'chmod 755 "$1" && mv "$1" "$2"' sh "${binary_path}.rollback-pending" "$binary_path" &&
-       docker restart --timeout 45 "$container" >/dev/null &&
+       { [[ "$(container_sha /proc/1/exe)" == "$old_sha" ]] || restart_container; } &&
        wait_health && [[ "$(container_sha "$binary_path")" == "$old_sha" ]]; then
       echo "Rollback verified; configuration was preserved." >&2
     else
@@ -85,9 +96,10 @@ docker cp "$artifact" "$container:${binary_path}.upgrade-pending"
 check_identity
 replaced=true
 docker exec "$container" sh -c 'chmod 755 "$1" && mv "$1" "$2"' sh "${binary_path}.upgrade-pending" "$binary_path"
-docker restart --timeout 45 "$container" >/dev/null
+restart_container
 wait_health
 [[ "$(container_sha "$binary_path")" == "$new_sha" ]]
+[[ "$(container_sha /proc/1/exe)" == "$new_sha" ]]
 [[ "$(container_sha "$config_path")" == "$config_sha" ]]
 [[ "$(docker inspect --format '{{.Id}}' "$container")" == "$container_id" ]]
 echo "Upgrade verified; exact binary is live, health is good, container and configuration are unchanged."
