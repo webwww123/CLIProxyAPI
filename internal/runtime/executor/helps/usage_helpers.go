@@ -22,26 +22,29 @@ import (
 )
 
 type UsageReporter struct {
-	provider        string
-	executorType    string
-	model           string
-	alias           string
-	authID          string
-	authIndex       string
-	authMu          sync.RWMutex
-	accessTokenHash string
-	authType        string
-	apiKey          string
-	source          string
-	reasoning       string
-	serviceTier     string
-	generate        bool
-	requestedAt     time.Time
-	ttftMu          sync.RWMutex
-	ttft            time.Duration
-	ttftStart       time.Time
-	ttftSet         bool
-	once            sync.Once
+	provider           string
+	executorType       string
+	model              string
+	alias              string
+	authID             string
+	authIndex          string
+	authMu             sync.RWMutex
+	accessTokenHash    string
+	authType           string
+	apiKey             string
+	source             string
+	reasoning          string
+	serviceTier        string
+	generate           bool
+	requestedAt        time.Time
+	ttftMu             sync.RWMutex
+	ttft               time.Duration
+	ttftStart          time.Time
+	ttftSet            bool
+	responseModelMu    sync.RWMutex
+	responseModel      string
+	responseModelFinal bool
+	once               sync.Once
 }
 
 type usageExecutor interface {
@@ -285,6 +288,7 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 		Provider:            r.provider,
 		ExecutorType:        r.executorType,
 		Model:               model,
+		ResponseModel:       r.ResponseModel(),
 		Alias:               r.alias,
 		Source:              r.source,
 		APIKey:              r.apiKey,

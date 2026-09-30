@@ -24,10 +24,12 @@ type Record struct {
 	// ExecutorType stores the concrete executor type that handled the request.
 	ExecutorType string
 	Model        string
-	Alias        string
-	APIKey       string
-	AuthID       string
-	AuthIndex    string
+	// ResponseModel stores the upstream-reported model without changing Model or Alias.
+	ResponseModel string
+	Alias         string
+	APIKey        string
+	AuthID        string
+	AuthIndex     string
 	// AccessTokenSHA256 identifies the OAuth token version without exposing the token.
 	AccessTokenSHA256 string
 	AuthType          string

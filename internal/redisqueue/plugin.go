@@ -108,6 +108,7 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 		Provider:            provider,
 		ExecutorType:        executorType,
 		Model:               modelName,
+		ResponseModel:       strings.TrimSpace(record.ResponseModel),
 		Alias:               aliasName,
 		Endpoint:            resolveEndpoint(ctx),
 		AuthType:            authType,
@@ -130,6 +131,7 @@ type queuedUsageDetail struct {
 	Provider            string                   `json:"provider"`
 	ExecutorType        string                   `json:"executor_type"`
 	Model               string                   `json:"model"`
+	ResponseModel       string                   `json:"response_model,omitempty"`
 	Alias               string                   `json:"alias"`
 	Endpoint            string                   `json:"endpoint"`
 	AuthType            string                   `json:"auth_type"`

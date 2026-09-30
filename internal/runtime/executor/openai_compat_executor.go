@@ -227,6 +227,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		return resp, err
 	}
 	helps.AppendAPIResponseChunk(ctx, e.cfg, body)
+	reporter.ObserveResponseModel(body)
 	reporter.Publish(ctx, helps.ParseOpenAIUsage(body))
 	// Ensure we at least record the request even if upstream doesn't return usage
 	reporter.EnsurePublished(ctx)
@@ -323,6 +324,7 @@ func (e *OpenAICompatExecutor) executeImages(ctx context.Context, auth *cliproxy
 		return resp, err
 	}
 
+	reporter.ObserveResponseModel(body)
 	reporter.Publish(ctx, helps.ParseOpenAIUsage(body))
 	reporter.EnsurePublished(ctx)
 	resp = cliproxyexecutor.Response{Payload: body, Headers: httpResp.Header.Clone()}
@@ -507,6 +509,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			}
 
 			streamLine := append([]byte("data: "), dataPayload...)
+			reporter.ObserveResponseModel(dataPayload)
 			chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, opts.OriginalRequest, translated, streamLine, &param, claudeInputTokens)
 			for i := range chunks {
 				select {
@@ -686,10 +689,13 @@ func (e *OpenAICompatExecutor) executeImagesStream(ctx context.Context, auth *cl
 			reporter.EnsurePublished(ctx)
 		}()
 		buffer := make([]byte, 32*1024)
+		modelObserver := helps.NewStreamResponseModelObserver(reporter)
+		defer modelObserver.Finish()
 		for {
 			n, errRead := httpResp.Body.Read(buffer)
 			if n > 0 {
 				chunk := bytes.Clone(buffer[:n])
+				modelObserver.Feed(chunk)
 				helps.AppendAPIResponseChunk(ctx, e.cfg, chunk)
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: chunk}:

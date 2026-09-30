@@ -33,6 +33,7 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 			Provider:            "openai",
 			ExecutorType:        "KimiExecutor",
 			Model:               "gpt-5.4",
+			ResponseModel:       "served-model",
 			Alias:               "client-gpt",
 			APIKey:              "test-key",
 			AuthIndex:           "0",
@@ -58,6 +59,7 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 		requireStringField(t, payload, "provider", "openai")
 		requireStringField(t, payload, "executor_type", "KimiExecutor")
 		requireStringField(t, payload, "model", "gpt-5.4")
+		requireStringField(t, payload, "response_model", "served-model")
 		requireStringField(t, payload, "alias", "client-gpt")
 		requireStringField(t, payload, "endpoint", "POST /v1/chat/completions")
 		requireStringField(t, payload, "auth_type", "apikey")
