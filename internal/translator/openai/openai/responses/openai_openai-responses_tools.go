@@ -298,6 +298,36 @@ func resolveResponsesQualifiedToolIdentity(root gjson.Result, qualifiedName stri
 	return name, namespace, found
 }
 
+// canonicalResponsesToolName resolves a bare name only when one emitted tool
+// owns it. Ambiguous names stay unresolved rather than selecting another tool.
+func canonicalResponsesToolName(requestRawJSON []byte, name string) string {
+	name = strings.TrimSpace(name)
+	root := gjson.ParseBytes(requestRawJSON)
+	if _, _, found := resolveResponsesQualifiedToolIdentity(root, name); found {
+		return name
+	}
+	seen := make(map[string]struct{})
+	candidate := ""
+	ambiguous := false
+	walkResponsesToolDeclarations(root, func(declaration responsesToolDeclaration) bool {
+		if _, duplicate := seen[declaration.chatName]; duplicate {
+			return true
+		}
+		seen[declaration.chatName] = struct{}{}
+		if declaration.localName == name {
+			if candidate != "" {
+				ambiguous = true
+			}
+			candidate = declaration.chatName
+		}
+		return true
+	})
+	if candidate != "" && !ambiguous {
+		return candidate
+	}
+	return name
+}
+
 func splitResponsesQualifiedFunctionCallFromRequest(requestRawJSON []byte, qualifiedName string) (name, namespace string) {
 	qualifiedName = strings.TrimSpace(qualifiedName)
 	if qualifiedName == "" {

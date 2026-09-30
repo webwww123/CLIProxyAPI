@@ -295,6 +295,7 @@ func convertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 
 	// Set messages.
 	if len(messageItems) > 0 {
+		messageItems = translatorcommon.AlignOpenAIToolCallMessages(messageItems)
 		out = translatorcommon.SetRawArrayItems(out, "messages", messageItems)
 	}
 
