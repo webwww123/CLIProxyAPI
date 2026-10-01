@@ -42,6 +42,11 @@ type ConvertOpenAIResponseToAnthropicParams struct {
 	ThinkingContentBlockStarted bool
 	// Track finish reason for later use
 	FinishReason string
+	// Keep cumulative usage until a real terminal signal. Some providers send
+	// usage alongside every text or tool-argument delta.
+	PromptTokens     int64
+	CompletionTokens int64
+	CachedTokens     int64
 	// Track if content blocks have been stopped
 	ContentBlocksStopped bool
 	// Track if message_delta has been sent
@@ -147,6 +152,17 @@ func terminalOpenAIFinishReason(param *ConvertOpenAIResponseToAnthropicParams) s
 func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAIResponseToAnthropicParams) [][]byte {
 	root := gjson.ParseBytes(rawJSON)
 	var results [][]byte
+	if usage := root.Get("usage"); usage.IsObject() {
+		if value := usage.Get("prompt_tokens"); value.Type == gjson.Number && value.Int() >= 0 {
+			param.PromptTokens = value.Int()
+		}
+		if value := usage.Get("completion_tokens"); value.Type == gjson.Number && value.Int() >= 0 {
+			param.CompletionTokens = value.Int()
+		}
+		if value := usage.Get("prompt_tokens_details.cached_tokens"); value.Type == gjson.Number && value.Int() >= 0 {
+			param.CachedTokens = value.Int()
+		}
+	}
 
 	// Initialize parameters if needed
 	if param.MessageID == "" {
@@ -301,13 +317,13 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 		// Don't send message_delta here - wait for usage info or [DONE]
 	}
 
-	// Handle usage information separately (this comes in a later chunk)
-	// Only process if usage has actual values (not null)
-	if !param.MessageDeltaSent && (param.FinishReason != "" || param.SawToolCall) {
+	// Running usage is not an end-of-message signal. Wait for an explicit
+	// finish reason here, or let [DONE] finalize providers that omit it.
+	if !param.MessageDeltaSent && param.FinishReason != "" {
 		usage := root.Get("usage")
 		if usage.Exists() && usage.Type != gjson.Null {
 			finalizeOpenAIAnthropicContentBlocks(param, &results)
-			inputTokens, outputTokens, cachedTokens := extractOpenAIUsage(usage)
+			inputTokens, outputTokens, cachedTokens := accumulatedOpenAIUsage(param)
 			emitAnthropicMessageDelta(param, &results, inputTokens, outputTokens, cachedTokens)
 			emitMessageStopIfNeeded(param, &results)
 		}
@@ -323,12 +339,17 @@ func convertOpenAIDoneToAnthropic(param *ConvertOpenAIResponseToAnthropicParams)
 	finalizeOpenAIAnthropicContentBlocks(param, &results)
 
 	if !param.MessageDeltaSent {
-		emitAnthropicMessageDelta(param, &results, 0, 0, 0)
+		inputTokens, outputTokens, cachedTokens := accumulatedOpenAIUsage(param)
+		emitAnthropicMessageDelta(param, &results, inputTokens, outputTokens, cachedTokens)
 	}
 
 	emitMessageStopIfNeeded(param, &results)
 
 	return results
+}
+
+func accumulatedOpenAIUsage(param *ConvertOpenAIResponseToAnthropicParams) (int64, int64, int64) {
+	return max(0, param.PromptTokens-param.CachedTokens), param.CompletionTokens, param.CachedTokens
 }
 
 // convertOpenAINonStreamingToAnthropic converts OpenAI non-streaming response to Anthropic format
